@@ -1,0 +1,4 @@
+symbol,exchange,datetime,open,high,low,close,volume,turnover
+000001.SZ,SZSE,2026-07-07T09:30:00+08:00,10,10.1,9.9,10.05,100,1005
+000001.SZ,SZSE,2026-07-07T09:31:00+08:00,10.05,10.2,10.0,10.15,110,1116.5
+
