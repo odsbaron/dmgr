@@ -17,6 +17,10 @@ Current implementation slice:
 - `quant_research.features.quality.FactorQualityAnalyzer`
 - `factor_quality_metric` DuckDB table
 
+Detailed quality-check guide:
+
+- `docs/development/factor-quality-checks.md`
+
 ## 1. Purpose
 
 `FeatureStore` turns factor computation results into durable research assets.
@@ -204,6 +208,8 @@ One row per factor store commit.
 | `row_count_input` | integer | Input rows if known. |
 | `row_count_feature` | integer | Long rows written. |
 | `row_count_snapshot` | integer | Snapshot rows written. |
+| `quality_status` | text | `NOT_RUN`, `PASSED`, `WARNING`, or `FAILED`. |
+| `quality_summary_json` | text | Compact summary from `FactorQualityReport.summary`. |
 | `error_code` | text | Nullable. |
 | `error_message` | text | Nullable. |
 
@@ -492,6 +498,12 @@ Deferred:
 6. Row-level `input_window_start` / `input_window_end` lineage.
 
 ## 16. Factor Quality Metrics
+
+Detailed implementation guide:
+
+```text
+docs/development/factor-quality-checks.md
+```
 
 Current implementation writes `factor_quality_metric` through:
 

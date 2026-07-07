@@ -19,6 +19,7 @@ Development docs:
 - `docs/development/data-ingestion-development.md`
 - `docs/development/factor-layer-polars-spec.md`
 - `docs/development/feature-store-spec.md`
+- `docs/development/factor-quality-checks.md`
 
 Implemented entry points:
 
