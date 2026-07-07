@@ -2,7 +2,7 @@
 
 > Branch: `feature/data-ingestion-spec`  
 > Worktree: `.worktrees/data-ingestion-spec`  
-> Scope: CSV / Parquet K line inputs -> normalized Bar schema -> validation -> `data/research.duckdb`.
+> Scope: CSV K line inputs -> normalized Bar schema -> validation -> local DuckDB store. Parquet is reserved behind the reader interface.
 
 ## 1. Purpose
 
@@ -13,7 +13,7 @@ It does not compute factors. It does not run strategies. It does not touch order
 The output of this lane is:
 
 ```text
-duckdb://curated_market_bar?dataset_id=...&freq=...&trading_date=...&symbol=...
+duckdb://curated_market_bar?dataset_id=...&freq=...&adjustment=...&source_run_id=...
 ```
 
 That `data_ref` becomes the input boundary for the factor-computation lane.
@@ -50,7 +50,6 @@ Recommended parallel lanes:
 | Lane | Branch | Responsibility | Depends on |
 |---|---|---|---|
 | Data ingestion | `feature/data-ingestion-spec` | SourceSpec, readers, normalization, validation, DuckDB writes | main baseline |
-| DuckDB store | `feature/duckdb-store` | Store adapter, schema creation, `data_ref` parser | data-ingestion contracts |
 | Factor registry | `feature/factor-registry` | FactorSpec, registry, built-in factor metadata | contracts |
 | Batch factors | `feature/batch-factor-compute` | Polars compute runner and feature writes | duckdb-store, factor-registry |
 | Pipeline CLI | `feature/research-pipeline-cli` | Typer commands and end-to-end runner | all prior lanes |
@@ -60,7 +59,6 @@ Branch merge order:
 ```text
 main
   <- feature/data-ingestion-spec
-  <- feature/duckdb-store
   <- feature/factor-registry
   <- feature/batch-factor-compute
   <- feature/research-pipeline-cli
@@ -72,7 +70,6 @@ main
 SourceSpec
   -> ImportRun(CREATED)
   -> read source file/table
-  -> raw_kline_import
   -> field mapping
   -> BarRecord normalization
   -> K line validation
@@ -84,6 +81,13 @@ SourceSpec
 ```
 
 The commit boundary is important: `curated_market_bar` is only visible to factor computation after validation passes or repair mode is explicitly enabled.
+
+Current implementation notes:
+
+- CSV is implemented by `CSVKLineReader`.
+- Parquet and DuckDB table readers are interface-compatible future adapters.
+- `raw_kline_import` is still planned; MVP code keeps `source_row_id` and `raw_ref` on each `BarRecord` and writes them to `curated_market_bar`.
+- Strict quality failures write `import_run` and `bar_quality_issue`, but do not write `curated_market_bar`.
 
 ## 5. SourceSpec
 
@@ -160,9 +164,9 @@ The system must write a failed import record if failure happens after `CREATED`.
 
 ## 7. DuckDB Tables
 
-### 7.1 `raw_kline_import`
+### 7.1 `raw_kline_import` planned
 
-Stores import metadata and raw row references.
+Stores import metadata and raw row references. This table is not implemented in the first code pass; lineage is currently represented by `source_run_id`, `source_row_id`, and `raw_ref` on curated rows and quality issues.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -258,6 +262,8 @@ raw_ref
 created_at
 ```
 
+Current table caveat: `created_at` is reserved in the spec but not written by the current `LocalDuckDBStore`. The implemented columns are the contract fields needed by `BarRecord`, `ImportRun`, and `QualityIssue`.
+
 Issue codes for MVP-0:
 
 ```text
@@ -322,7 +328,7 @@ Parsing rules:
 
 ## 11. Reader Interfaces
 
-The implementation should expose small interfaces:
+The implementation exposes small interfaces:
 
 ```python
 class KLineReader(Protocol):
@@ -330,43 +336,75 @@ class KLineReader(Protocol):
         ...
 
 
-class BarNormalizer(Protocol):
-    def normalize(self, row: RawKLineRow, spec: SourceSpec) -> BarRecord:
-        ...
-
-
-class ResearchStore(Protocol):
-    def begin_import(self, spec: SourceSpec) -> ImportRun:
-        ...
-
-    def commit_bars(
+class KLineStore(Protocol):
+    def commit_import(
         self,
         run: ImportRun,
         bars: Iterable[BarRecord],
-        issues: Iterable[QualityIssue],
+        report: QualityReport,
     ) -> DataRef:
+        ...
+
+    def fail_import(
+        self,
+        run: ImportRun,
+        report: QualityReport,
+        *,
+        error_code: str,
+        error_message: str,
+    ) -> None:
+        ...
+
+    def find_committed_import(...) -> ImportRun | None:
         ...
 ```
 
-These interfaces are implementation guides, not public cross-package contracts yet.
+`DataIngestionService.ingest(spec)` orchestrates these ports and returns an `IngestionResult`.
+
+Implemented code map:
+
+| Area | Path |
+|---|---|
+| Contracts | `src/quant_research/contracts/` |
+| CSV reader | `src/quant_research/data/readers/csv_reader.py` |
+| Bar normalization | `src/quant_research/data/normalize.py` |
+| Quality gate | `src/quant_research/data/quality.py` |
+| DuckDB adapter | `src/quant_research/data/duckdb_store.py` |
+| Ingestion orchestration | `src/quant_research/data/ingestion.py` |
 
 ## 12. Tests
 
-Minimum tests:
+Minimum tests and current coverage:
 
-1. CSV daily fixture imports into `curated_market_bar`.
-2. CSV minute fixture preserves minute `bar_start_time`.
-3. Duplicate bar is recorded as `DUPLICATE_BAR`.
-4. Invalid OHLC blocks curated write in strict mode.
-5. Rerun with same source hash returns existing `data_ref`.
-6. Failed import writes `import_run.status = FAILED`.
-7. DataRef parser rejects non-DuckDB refs.
+| Requirement | Test |
+|---|---|
+| CSV daily fixture imports into `curated_market_bar` | `tests/data/test_ingestion_service.py` |
+| CSV minute fixture preserves minute `bar_start_time` | `tests/data/test_read_normalize_quality.py` |
+| Duplicate bar is recorded as `DUPLICATE_BAR` | `tests/data/test_duckdb_store.py` |
+| Invalid OHLC blocks curated write in strict mode | `tests/data/test_ingestion_service.py` |
+| Rerun with same source hash returns existing `data_ref` | `tests/data/test_ingestion_service.py` |
+| Failed import writes `import_run.status = FAILED` | `tests/data/test_duckdb_store.py` |
+| DataRef parser rejects non-DuckDB refs | `tests/contracts/test_ingestion_contracts.py` |
+
+Run:
+
+```bash
+.venv/bin/python -m pytest -v
+.venv/bin/ruff check src tests
+```
 
 ## 13. Handoff Criteria
 
-Data ingestion lane is ready for merge when:
+Data ingestion lane is ready for merge into the next factor-development lane when:
 
 - `docs/development/data-ingestion-development.md` is complete.
-- SourceSpec, ImportRun, DuckDB tables, idempotency, validation gate, and data_ref semantics are implemented.
+- SourceSpec, ImportRun, DuckDB tables, idempotency, validation gate, and data_ref semantics are implemented for CSV.
 - Fixture tests pass for daily and minute data.
 - No factor code depends on raw file paths.
+
+Known next increments:
+
+1. Add Parquet reader behind the existing `KLineReader` port.
+2. Add `raw_kline_import` audit table if raw-row replay becomes necessary.
+3. Add trading-calendar gap checks and session-window checks.
+4. Start factor lane from `DataRef`, not from file paths.
