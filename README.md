@@ -18,16 +18,28 @@ Development docs:
 
 - `docs/development/data-ingestion-development.md`
 - `docs/development/factor-layer-polars-spec.md`
+- `docs/development/feature-store-spec.md`
 
 Implemented entry points:
 
 - `quant_research.data.ingestion.DataIngestionService`
 - `quant_research.data.duckdb_store.LocalDuckDBStore`
 - `quant_research.data.readers.csv_reader.CSVKLineReader`
+- `quant_research.factors.contracts.FactorSpec`
+- `quant_research.factors.dsl.field`
+- `quant_research.factors.dsl.op`
+- `quant_research.factors.operators.OperatorRegistry`
+- `quant_research.factors.registry.FactorRegistry`
+- `quant_research.factors.polars.PolarsFactorRunner`
 
 Next implementation lane:
 
-- Polars-backed factor layer: `DataRef -> FactorSpec / FactorRegistry -> Polars runner -> feature_table / feature_snapshot / factor_run_manifest`
+- FeatureStore: `PolarsFactorRunner output -> feature_table / feature_snapshot / factor_run_manifest -> DataRef(feature_snapshot)`
+
+Supported factor authoring modes:
+
+- Production: `Operator DSL-lite -> OperatorRegistry -> PolarsFactorRunner`
+- Research: native Polars `polars_expr` or `frame_transform`
 
 Verification:
 

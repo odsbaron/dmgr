@@ -102,6 +102,17 @@ Component responsibilities:
 
 ## 5. Core Contracts
 
+Current implementation slice:
+
+- `quant_research.factors.contracts.FactorSpec`
+- `quant_research.factors.contracts.FactorRunConfig`
+- `quant_research.factors.registry.FactorRegistry`
+- `quant_research.factors.operators.OperatorRegistry`
+- `quant_research.factors.dsl.field`
+- `quant_research.factors.dsl.call_op`
+- `quant_research.factors.dsl.op`
+- `quant_research.factors.polars.PolarsFactorRunner`
+
 ### 5.1 `FactorSpec`
 
 Required fields:
@@ -161,6 +172,16 @@ Rules:
 1. Prefer `PolarsExprFactory` for simple rolling, return, moving average, volatility, and volume factors.
 2. Use `PolarsFrameTransform` when the factor needs multiple intermediate columns or cross-column logic.
 3. Use `PythonUdfFactor` only when vectorized Polars expressions are not practical. The manifest must mark `compute_mode = python_udf`.
+
+Current implementation supports:
+
+```text
+operator_graph
+polars_expr
+frame_transform
+```
+
+`python_udf` is represented in `ComputeMode` but intentionally not executable in the Polars runner yet.
 
 ### 5.3 `FactorRunConfig`
 
@@ -398,6 +419,71 @@ pl.col("close").rolling_mean(window_size=20).over("symbol").alias("ma_20")
 ```
 
 The runner must sort by `symbol, as_of` before applying window expressions.
+
+Implemented production-factor pattern:
+
+```python
+from quant_research.factors.dsl import field, op
+
+registry.register(
+    ret_1_spec,
+    op.pct_change(field("close"), periods=1).alias("ret_1"),
+)
+
+registry.register(
+    ma_20_spec,
+    op.rolling_mean(field("close"), window=20).alias("ma_20"),
+)
+```
+
+The expression is compiled through `OperatorRegistry`, not hard-coded into the factor definition. Optimized operators can be swapped or added by registering a new `OperatorSpec`.
+
+Example custom operator:
+
+```python
+operator_registry.register(
+    OperatorSpec(
+        op_id="double",
+        description="Example optimized operator.",
+        requires_sorted=False,
+        supports_streaming=True,
+        compile_polars=lambda args, params: args[0] * 2.0,
+    )
+)
+```
+
+### 9.2.1 Native Polars Exploration
+
+Native Polars expression factors are allowed for fast research iteration:
+
+```python
+registry.register(
+    intrabar_ret_spec,
+    lambda spec, config: [
+        (pl.col("close") / pl.col("open") - 1.0).alias("intrabar_ret")
+    ],
+)
+```
+
+Frame-transform factors are allowed when a factor needs to return a transformed `LazyFrame`:
+
+```python
+registry.register(
+    close_minus_open_spec,
+    lambda frame, spec, config: frame.with_columns(
+        (pl.col("close") - pl.col("open")).alias("close_minus_open")
+    ),
+)
+```
+
+Both paths must be marked in `FactorSpec.compute_mode` as `polars_expr` or `frame_transform` so manifests and later quality checks can distinguish exploration factors from standard operator-graph factors.
+
+Current runner guardrails:
+
+- Before each factor runs, `PolarsFactorRunner` checks `FactorSpec.input_fields` against the current `LazyFrame` schema.
+- After each factor runs, it checks `FactorSpec.output_fields` against the produced schema.
+- Missing inputs raise `InputFieldError`.
+- Missing declared outputs raise `FactorOutputError`.
 
 ### 9.3 Streaming
 
