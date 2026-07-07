@@ -1,0 +1,2 @@
+"""Stable data ingestion contracts."""
+

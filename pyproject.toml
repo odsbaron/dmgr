@@ -1,0 +1,24 @@
+[project]
+name = "quant-research-mvp0"
+version = "0.1.0"
+description = "K line batch research framework with local DuckDB storage"
+requires-python = ">=3.11"
+dependencies = [
+  "duckdb>=1.0.0",
+  "polars>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "ruff>=0.6.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
