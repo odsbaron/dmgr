@@ -31,10 +31,14 @@ Implemented entry points:
 - `quant_research.factors.operators.OperatorRegistry`
 - `quant_research.factors.registry.FactorRegistry`
 - `quant_research.factors.polars.PolarsFactorRunner`
+- `quant_research.features.contracts.FeatureCommitRequest`
+- `quant_research.features.transform.wide_to_feature_values`
+- `quant_research.features.transform.build_feature_snapshots`
+- `quant_research.features.duckdb_store.LocalDuckDBFeatureStore`
 
 Next implementation lane:
 
-- FeatureStore: `PolarsFactorRunner output -> feature_table / feature_snapshot / factor_run_manifest -> DataRef(feature_snapshot)`
+- Factor quality metrics: `feature_table / feature_snapshot -> factor_quality_metric -> quality-gated manifests`
 
 Supported factor authoring modes:
 

@@ -4,6 +4,17 @@
 > Scope: factor result frame -> DuckDB feature assets -> snapshot `DataRef`.
 > Status: implementation-ready spec for the next development slice.
 
+Current implementation slice:
+
+- `quant_research.features.contracts.FeatureCommitRequest`
+- `quant_research.features.contracts.FeatureCommitResult`
+- `quant_research.features.contracts.FeatureRunManifest`
+- `quant_research.features.contracts.FeatureValue`
+- `quant_research.features.contracts.FeatureSnapshot`
+- `quant_research.features.transform.wide_to_feature_values`
+- `quant_research.features.transform.build_feature_snapshots`
+- `quant_research.features.duckdb_store.LocalDuckDBFeatureStore`
+
 ## 1. Purpose
 
 `FeatureStore` turns factor computation results into durable research assets.
