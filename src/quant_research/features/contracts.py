@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Any
 
 import polars as pl
 
@@ -63,6 +64,8 @@ class FeatureRunManifest:
     row_count_input: int | None
     row_count_feature: int
     row_count_snapshot: int
+    quality_status: str = "NOT_RUN"
+    quality_summary: dict[str, Any] = field(default_factory=dict)
     error_code: str | None = None
     error_message: str | None = None
 

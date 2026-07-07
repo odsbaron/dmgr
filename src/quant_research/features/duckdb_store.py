@@ -16,6 +16,7 @@ from quant_research.features.contracts import (
     FeatureStoreError,
     FeatureValue,
 )
+from quant_research.features.quality import FactorQualityMetric, FactorQualityReport, QualitySeverity
 from quant_research.features.transform import build_feature_snapshots, wide_to_feature_values
 
 
@@ -70,8 +71,22 @@ _MANIFEST_COLUMNS = (
     "row_count_input",
     "row_count_feature",
     "row_count_snapshot",
+    "quality_status",
+    "quality_summary_json",
     "error_code",
     "error_message",
+)
+
+_QUALITY_METRIC_COLUMNS = (
+    "factor_run_id",
+    "feature_set_id",
+    "factor_id",
+    "output_field",
+    "metric_name",
+    "metric_value",
+    "metric_json",
+    "severity",
+    "created_at",
 )
 
 
@@ -152,6 +167,45 @@ class LocalDuckDBFeatureStore:
             ).fetchone()
         return self._row_to_manifest(row) if row else None
 
+    def commit_quality_report(self, report: FactorQualityReport) -> None:
+        with self._connect() as conn:
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                conn.execute(
+                    "DELETE FROM factor_quality_metric WHERE factor_run_id = ?",
+                    [report.factor_run_id],
+                )
+                self._insert_quality_metrics(conn, list(report.metrics))
+                conn.execute(
+                    """
+                    UPDATE factor_run_manifest
+                    SET quality_status = ?, quality_summary_json = ?
+                    WHERE factor_run_id = ?
+                    """,
+                    [
+                        report.status.value,
+                        json.dumps(report.summary, sort_keys=True),
+                        report.factor_run_id,
+                    ],
+                )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+
+    def list_quality_metrics(self, factor_run_id: str) -> list[FactorQualityMetric]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {", ".join(_QUALITY_METRIC_COLUMNS)}
+                FROM factor_quality_metric
+                WHERE factor_run_id = ?
+                ORDER BY factor_id, output_field, metric_name
+                """,
+                [factor_run_id],
+            ).fetchall()
+        return [self._row_to_quality_metric(row) for row in rows]
+
     def read_feature_table(self, ref: DataRef | str) -> list[FeatureValue]:
         data_ref = DataRef.parse(ref) if isinstance(ref, str) else ref
         if data_ref.table != "feature_table":
@@ -206,6 +260,8 @@ class LocalDuckDBFeatureStore:
                     row_count_input BIGINT,
                     row_count_feature BIGINT NOT NULL,
                     row_count_snapshot BIGINT NOT NULL,
+                    quality_status VARCHAR NOT NULL,
+                    quality_summary_json VARCHAR NOT NULL,
                     error_code VARCHAR,
                     error_message VARCHAR
                 )
@@ -248,6 +304,21 @@ class LocalDuckDBFeatureStore:
                     warmup_complete BOOLEAN NOT NULL,
                     quality_flags_json VARCHAR NOT NULL,
                     feature_ref VARCHAR NOT NULL,
+                    created_at VARCHAR NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS factor_quality_metric (
+                    factor_run_id VARCHAR NOT NULL,
+                    feature_set_id VARCHAR NOT NULL,
+                    factor_id VARCHAR NOT NULL,
+                    output_field VARCHAR NOT NULL,
+                    metric_name VARCHAR NOT NULL,
+                    metric_value DOUBLE NOT NULL,
+                    metric_json VARCHAR NOT NULL,
+                    severity VARCHAR NOT NULL,
                     created_at VARCHAR NOT NULL
                 )
                 """
@@ -371,6 +442,22 @@ class LocalDuckDBFeatureStore:
             VALUES ({placeholders})
             """,
             [self._snapshot_to_row(snapshot) for snapshot in snapshots],
+        )
+
+    def _insert_quality_metrics(
+        self,
+        conn,
+        metrics: list[FactorQualityMetric],
+    ) -> None:
+        if not metrics:
+            return
+        placeholders = ", ".join(["?"] * len(_QUALITY_METRIC_COLUMNS))
+        conn.executemany(
+            f"""
+            INSERT INTO factor_quality_metric ({", ".join(_QUALITY_METRIC_COLUMNS)})
+            VALUES ({placeholders})
+            """,
+            [self._quality_metric_to_row(metric) for metric in metrics],
         )
 
     def _feature_table_ref(self, factor_run_id: str) -> DataRef:
@@ -514,6 +601,8 @@ class LocalDuckDBFeatureStore:
             manifest.row_count_input,
             manifest.row_count_feature,
             manifest.row_count_snapshot,
+            manifest.quality_status,
+            json.dumps(manifest.quality_summary, sort_keys=True),
             manifest.error_code,
             manifest.error_message,
         )
@@ -537,6 +626,34 @@ class LocalDuckDBFeatureStore:
             row_count_input=row[12],
             row_count_feature=row[13],
             row_count_snapshot=row[14],
-            error_code=row[15],
-            error_message=row[16],
+            quality_status=row[15],
+            quality_summary=json.loads(row[16]),
+            error_code=row[17],
+            error_message=row[18],
+        )
+
+    def _quality_metric_to_row(self, metric: FactorQualityMetric) -> tuple[object, ...]:
+        return (
+            metric.factor_run_id,
+            metric.feature_set_id,
+            metric.factor_id,
+            metric.output_field,
+            metric.metric_name,
+            metric.metric_value,
+            json.dumps(metric.metric_json, sort_keys=True),
+            metric.severity.value,
+            metric.created_at,
+        )
+
+    def _row_to_quality_metric(self, row) -> FactorQualityMetric:
+        return FactorQualityMetric(
+            factor_run_id=row[0],
+            feature_set_id=row[1],
+            factor_id=row[2],
+            output_field=row[3],
+            metric_name=row[4],
+            metric_value=row[5],
+            metric_json=json.loads(row[6]),
+            severity=QualitySeverity(row[7]),
+            created_at=row[8],
         )

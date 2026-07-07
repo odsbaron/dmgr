@@ -14,6 +14,8 @@ Current implementation slice:
 - `quant_research.features.transform.wide_to_feature_values`
 - `quant_research.features.transform.build_feature_snapshots`
 - `quant_research.features.duckdb_store.LocalDuckDBFeatureStore`
+- `quant_research.features.quality.FactorQualityAnalyzer`
+- `factor_quality_metric` DuckDB table
 
 ## 1. Purpose
 
@@ -482,9 +484,61 @@ Steps:
 
 Deferred:
 
-1. `factor_quality_metric` write path.
-2. Config hash idempotency.
-3. Partitioned Parquet export.
-4. Feature matrix materialization for model training.
-5. Cross-run snapshot merge.
-6. Stream-compatible incremental feature cache.
+1. Config hash idempotency.
+2. Partitioned Parquet export.
+3. Feature matrix materialization for model training.
+4. Cross-run snapshot merge.
+5. Stream-compatible incremental feature cache.
+6. Row-level `input_window_start` / `input_window_end` lineage.
+
+## 16. Factor Quality Metrics
+
+Current implementation writes `factor_quality_metric` through:
+
+```python
+FactorQualityAnalyzer().analyze(feature_values, resolved_factors)
+LocalDuckDBFeatureStore.commit_quality_report(report)
+```
+
+Metrics currently emitted per factor output:
+
+```text
+row_count
+null_ratio
+warmup_incomplete_count
+duplicate_key_count
+future_leakage_count
+```
+
+Manifest quality fields:
+
+```text
+quality_status
+quality_summary_json
+```
+
+### 16.1 Future Leakage With Forward Calculation
+
+The first implementation treats forward calculation as an explicit quality rule:
+
+```python
+quality_rules={
+    "forward_bars": 1,
+    "causal": False,
+}
+```
+
+Rule:
+
+```text
+forward_bars > 0 OR causal = false OR uses_future_data = true
+  -> future_leakage_count = row_count for that factor output
+future_leakage_count > 0 -> severity = ERROR
+any ERROR -> quality_status = FAILED
+```
+
+This is intentionally conservative. A forward-return or label-style factor should not pass as a normal feature. Later, row-level lineage can strengthen the check:
+
+```text
+input_window_end > as_of -> future_leakage_count += 1
+```

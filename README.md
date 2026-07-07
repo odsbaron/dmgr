@@ -35,10 +35,11 @@ Implemented entry points:
 - `quant_research.features.transform.wide_to_feature_values`
 - `quant_research.features.transform.build_feature_snapshots`
 - `quant_research.features.duckdb_store.LocalDuckDBFeatureStore`
+- `quant_research.features.quality.FactorQualityAnalyzer`
 
 Next implementation lane:
 
-- Factor quality metrics: `feature_table / feature_snapshot -> factor_quality_metric -> quality-gated manifests`
+- End-to-end research pipeline: `ingest -> factor compute -> feature store -> quality metrics`
 
 Supported factor authoring modes:
 

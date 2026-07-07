@@ -7,6 +7,7 @@ from quant_research.factors.contracts import ComputeMode, FactorRunConfig, Facto
 from quant_research.factors.registry import RegisteredFactor
 from quant_research.features.contracts import FeatureCommitRequest, FeatureRunStatus
 from quant_research.features.duckdb_store import LocalDuckDBFeatureStore
+from quant_research.features.quality import FactorQualityAnalyzer, QualityStatus
 
 
 def factor_spec(
@@ -14,6 +15,7 @@ def factor_spec(
     *,
     output_field: str | None = None,
     warmup_bars: int = 0,
+    forward_bars: int = 0,
 ) -> FactorSpec:
     return FactorSpec(
         factor_id=factor_id,
@@ -26,6 +28,10 @@ def factor_spec(
         lookback_bars=max(1, warmup_bars + 1),
         warmup_bars=warmup_bars,
         compute_mode=ComputeMode.OPERATOR_GRAPH,
+        quality_rules={
+            "forward_bars": forward_bars,
+            "causal": forward_bars == 0,
+        },
     )
 
 
@@ -165,3 +171,51 @@ def test_feature_store_rejects_recommit_of_committed_run(tmp_path):
     assert second.error_code == "FEATURE_RUN_ALREADY_COMMITTED"
     assert store.get_manifest("factor-run-1").status == FeatureRunStatus.COMMITTED
     assert len(store.read_feature_table(first.feature_table_ref)) == 4
+
+
+def test_feature_store_writes_quality_metrics_and_updates_manifest(tmp_path):
+    store = LocalDuckDBFeatureStore(tmp_path / "research.duckdb")
+    commit = store.commit_run(request())
+    values = store.read_feature_table(commit.feature_table_ref)
+    report = FactorQualityAnalyzer().analyze(values, request().resolved_factors)
+
+    store.commit_quality_report(report)
+
+    metrics = store.list_quality_metrics("factor-run-1")
+    manifest = store.get_manifest("factor-run-1")
+
+    assert any(metric.metric_name == "null_ratio" for metric in metrics)
+    assert any(metric.metric_name == "future_leakage_count" for metric in metrics)
+    assert manifest.quality_status == QualityStatus.PASSED.value
+    assert manifest.quality_summary["status"] == "PASSED"
+
+
+def test_feature_store_marks_manifest_quality_failed_for_forward_leakage(tmp_path):
+    store = LocalDuckDBFeatureStore(tmp_path / "research.duckdb")
+    forward_factor = (
+        RegisteredFactor(
+            factor_spec("ret_1", warmup_bars=0, forward_bars=1),
+            compute=None,
+        ),
+        RegisteredFactor(
+            factor_spec("ma_3", warmup_bars=0),
+            compute=None,
+        ),
+    )
+    commit = store.commit_run(request(resolved_factors=forward_factor))
+    values = store.read_feature_table(commit.feature_table_ref)
+    report = FactorQualityAnalyzer().analyze(values, forward_factor)
+
+    store.commit_quality_report(report)
+
+    leakage = [
+        metric
+        for metric in store.list_quality_metrics("factor-run-1")
+        if metric.metric_name == "future_leakage_count"
+        and metric.factor_id == "ret_1"
+    ][0]
+    manifest = store.get_manifest("factor-run-1")
+
+    assert leakage.metric_value == 2
+    assert leakage.severity.value == "ERROR"
+    assert manifest.quality_status == QualityStatus.FAILED.value
