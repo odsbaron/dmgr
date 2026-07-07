@@ -17,12 +17,17 @@ Parquet is reserved behind the reader interface.
 Development docs:
 
 - `docs/development/data-ingestion-development.md`
+- `docs/development/factor-layer-polars-spec.md`
 
 Implemented entry points:
 
 - `quant_research.data.ingestion.DataIngestionService`
 - `quant_research.data.duckdb_store.LocalDuckDBStore`
 - `quant_research.data.readers.csv_reader.CSVKLineReader`
+
+Next implementation lane:
+
+- Polars-backed factor layer: `DataRef -> FactorSpec / FactorRegistry -> Polars runner -> feature_table / feature_snapshot / factor_run_manifest`
 
 Verification:
 
