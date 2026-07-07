@@ -20,6 +20,7 @@ Development docs:
 - `docs/development/factor-layer-polars-spec.md`
 - `docs/development/feature-store-spec.md`
 - `docs/development/factor-quality-checks.md`
+- `docs/superpowers/plans/2026-07-08-research-pipeline-after-factor-quality.md`
 
 Implemented entry points:
 
