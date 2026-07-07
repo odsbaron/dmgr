@@ -18,6 +18,7 @@ Development docs:
 
 - `docs/development/data-ingestion-development.md`
 - `docs/development/factor-layer-polars-spec.md`
+- `docs/development/feature-store-spec.md`
 
 Implemented entry points:
 
@@ -33,7 +34,7 @@ Implemented entry points:
 
 Next implementation lane:
 
-- Polars-backed factor layer: `DataRef -> FactorSpec / FactorRegistry -> Polars runner -> feature_table / feature_snapshot / factor_run_manifest`
+- FeatureStore: `PolarsFactorRunner output -> feature_table / feature_snapshot / factor_run_manifest -> DataRef(feature_snapshot)`
 
 Supported factor authoring modes:
 
