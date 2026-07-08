@@ -155,6 +155,11 @@ This preserves the distinction:
 feature_snapshot exists != feature_snapshot is consumable
 ```
 
+Dataset builders should use the consumption path. For example,
+`TrainingFeatureMatrixBuilder` receives a `FeatureQualityGate`, reads
+`snapshot_ref` through that gate, and only then expands snapshot JSON into a
+table-shaped matrix.
+
 ## 4. Contracts
 
 ### 4.1 `FeatureRunStatus`

@@ -2,7 +2,7 @@
 
 > Branch: `feature/factor-quality-metrics`
 > Scope: curated bars -> factor compute -> FeatureStore -> quality metrics -> research run result.
-> Status: core service and consumer-side quality gate implemented; CLI is a later slice.
+> Status: core service, consumer-side quality gate, and training matrix entry point implemented; CLI is a later slice.
 
 Current implementation slice:
 
@@ -13,6 +13,8 @@ Current implementation slice:
 - `quant_research.pipeline.research.ResearchPipeline`
 - `quant_research.pipeline.research.merge_quality_reports`
 - `quant_research.features.gates.FeatureQualityGate`
+- `quant_research.datasets.feature_matrix.TrainingFeatureMatrixBuilder`
+- `quant_research.datasets.feature_matrix.snapshots_to_feature_matrix`
 
 ## 1. Purpose
 
@@ -438,9 +440,34 @@ feature_store.read_snapshot(snapshot_ref)
 FeatureQualityGate(feature_store).read_consumable_snapshot(snapshot_ref)
 ```
 
-## 12. Testing Plan
+## 12. Training Matrix Entry Point
 
-### 12.1 Bar frame adapter tests
+`TrainingFeatureMatrixBuilder` is the first dataset-side consumer entry point.
+It starts from a `feature_snapshot` `DataRef`, not from raw feature tables:
+
+```python
+matrix = TrainingFeatureMatrixBuilder(
+    FeatureQualityGate(feature_store)
+).build(
+    snapshot_ref,
+    feature_fields=("ret_1", "ma_3"),
+)
+```
+
+The builder does only two things:
+
+| Step | Owner |
+|---|---|
+| Check that the snapshot is consumable | `FeatureQualityGate` |
+| Expand `FeatureSnapshot.features` into table columns | `TrainingFeatureMatrixBuilder` |
+
+It deliberately does not read bars, recompute factors, inspect quality metrics,
+or join labels. Label joins belong to a later label-side dataset builder so
+forward-looking targets never enter live feature consumption by accident.
+
+## 13. Testing Plan
+
+### 13.1 Bar frame adapter tests
 
 | Test | Expected |
 |---|---|
@@ -448,7 +475,7 @@ FeatureQualityGate(feature_store).read_consumable_snapshot(snapshot_ref)
 | minute bars convert to factor frame | `as_of` keeps minute `bar_end_time`. |
 | empty bars fail | pipeline cannot commit empty factor input. |
 
-### 12.2 Pipeline happy path
+### 13.2 Pipeline happy path
 
 Fixture:
 
@@ -471,7 +498,7 @@ row_count_feature > 0
 row_count_snapshot > 0
 ```
 
-### 12.3 Static quality failure path
+### 13.3 Static quality failure path
 
 Factor spec:
 
@@ -490,7 +517,7 @@ factor_quality_metric contains null_ratio ERROR
 snapshot_ref exists for audit
 ```
 
-### 12.4 Prefix leakage failure path
+### 13.4 Prefix leakage failure path
 
 Factor:
 
@@ -508,7 +535,7 @@ block_reason = "quality_failed"
 factor_quality_metric contains prefix_invariance_violation_count ERROR
 ```
 
-### 12.5 Request validation tests
+### 13.5 Request validation tests
 
 | Invalid request | Expected error |
 |---|---|
@@ -520,7 +547,16 @@ factor_quality_metric contains prefix_invariance_violation_count ERROR
 | missing or unsupported `freq` in `input_data_ref` | `parse_input_ref` failure. |
 | `as_of_start > as_of_end` | `validate_request` failure. |
 
-## 13. Implementation Order
+### 13.6 Training matrix entry tests
+
+| Test | Expected |
+|---|---|
+| snapshots expand to stable columns | Metadata columns stay first; feature columns are deterministic. |
+| builder reads through `FeatureQualityGate` | `PASSED` committed snapshots become a `pl.LazyFrame`. |
+| failed-quality snapshot is blocked | `FeatureConsumptionBlocked` is raised before matrix construction. |
+| empty snapshot iterable | `ValueError` avoids returning an ambiguous empty matrix. |
+
+## 14. Implementation Order
 
 1. Add `pipeline/contracts.py` with request/result/status.
 2. Add `pipeline/bar_frame.py` and tests.
@@ -537,7 +573,7 @@ factor_quality_metric contains prefix_invariance_violation_count ERROR
 git diff --check
 ```
 
-## 14. Open Decisions
+## 15. Open Decisions
 
 | Decision | MVP-1 choice |
 |---|---|

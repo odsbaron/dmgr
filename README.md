@@ -43,6 +43,8 @@ Implemented entry points:
 - `quant_research.features.leakage.PrefixInvarianceLeakageDetector`
 - `quant_research.features.leakage.prefix_report_to_quality_metrics`
 - `quant_research.features.gates.FeatureQualityGate`
+- `quant_research.datasets.feature_matrix.TrainingFeatureMatrixBuilder`
+- `quant_research.datasets.feature_matrix.snapshots_to_feature_matrix`
 - `quant_research.pipeline.contracts.ResearchRunRequest`
 - `quant_research.pipeline.contracts.ResearchRunResult`
 - `quant_research.pipeline.bar_frame.bars_to_factor_frame`
@@ -51,6 +53,7 @@ Implemented entry points:
 Next implementation lane:
 
 - CLI wrapper for the research pipeline
+- Label store and label-side training dataset joins
 
 Supported factor authoring modes:
 

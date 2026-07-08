@@ -33,7 +33,7 @@ PolarsFactorRunner
 - `FactorQualityAnalyzer` 负责计算质量指标。
 - `commit_quality_report(...)` 负责持久化质量报告并更新 manifest。
 - 当前质量检查在 commit 后执行；它会标记 run 的 `quality_status`，但不会回滚已写入的 feature rows。
-- 下游消费方必须读取 `factor_run_manifest.quality_status`，只消费 `PASSED` 或明确允许的 `WARNING` run。
+- 下游消费方必须读取 `factor_run_manifest.quality_status`，MVP-1 只消费 `PASSED` run；任何非 `PASSED` 状态都阻断训练、回测、策略和准实盘消费。
 
 ## 2. Module Ownership
 
@@ -474,9 +474,8 @@ assert manifest.quality_status in {"PASSED", "WARNING", "FAILED"}
 
 ```text
 Research notebook:
-  allow PASSED
-  optionally allow WARNING
-  block FAILED unless explicitly debugging
+  consume PASSED through FeatureQualityGate
+  use failed runs only through audit/debug reads
 
 Training dataset:
   require PASSED for feature side
