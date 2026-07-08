@@ -2,7 +2,7 @@
 
 > Branch: `feature/factor-quality-metrics`
 > Scope: curated bars -> factor compute -> FeatureStore -> quality metrics -> research run result.
-> Status: core service implemented; CLI and consumer-side quality gate are later slices.
+> Status: core service and consumer-side quality gate implemented; CLI is a later slice.
 
 Current implementation slice:
 
@@ -12,6 +12,7 @@ Current implementation slice:
 - `quant_research.pipeline.bar_frame.bars_to_factor_frame`
 - `quant_research.pipeline.research.ResearchPipeline`
 - `quant_research.pipeline.research.merge_quality_reports`
+- `quant_research.features.gates.FeatureQualityGate`
 
 ## 1. Purpose
 
@@ -426,6 +427,16 @@ otherwise                -> consumable = False
 There is no `allow_quality_warnings` switch in MVP-1. Non-`PASSED` quality is
 blocked from downstream backtest, strategy, and training consumption. Failed
 quality assets remain available for audit through their refs.
+
+Two read paths are intentionally separate:
+
+```python
+# Audit/debug path: allowed even when quality failed.
+feature_store.read_snapshot(snapshot_ref)
+
+# Consumption path: blocks unless manifest is COMMITTED and quality is PASSED.
+FeatureQualityGate(feature_store).read_consumable_snapshot(snapshot_ref)
+```
 
 ## 12. Testing Plan
 

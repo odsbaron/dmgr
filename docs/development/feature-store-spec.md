@@ -15,6 +15,7 @@ Current implementation slice:
 - `quant_research.features.transform.build_feature_snapshots`
 - `quant_research.features.duckdb_store.LocalDuckDBFeatureStore`
 - `quant_research.features.quality.FactorQualityAnalyzer`
+- `quant_research.features.gates.FeatureQualityGate`
 - `factor_quality_metric` DuckDB table
 
 Detailed quality-check guide:
@@ -64,6 +65,7 @@ FeatureStore must not do:
 | Choose strategy signals | strategy layer |
 | Run portfolio/risk/order logic | trading runtime |
 | Repair bad factor values silently | quality layer |
+| Decide if a snapshot can enter backtest/training/strategy consumption | consumer-side quality gate |
 
 ## 3. Boundary Contract
 
@@ -126,6 +128,31 @@ Primary returned ref:
 
 ```text
 duckdb://feature_snapshot?feature_set_id=<id>&factor_run_id=<run>&dataset_id=<dataset>&freq=<freq>
+```
+
+### 3.3 Audit Read vs Consumption Read
+
+Feature assets can exist even when quality failed. Keep two read paths separate:
+
+```python
+# Audit/debug path: may read failed-quality assets.
+feature_store.read_snapshot(snapshot_ref)
+
+# Consumption path: only reads PASSED committed assets.
+FeatureQualityGate(feature_store).read_consumable_snapshot(snapshot_ref)
+```
+
+Rules:
+
+| Path | Intended use | Quality behavior |
+|---|---|---|
+| `LocalDuckDBFeatureStore.read_snapshot` | Audit, debugging, reports | Does not enforce consumption policy. |
+| `FeatureQualityGate.read_consumable_snapshot` | Backtest, training, strategy | Requires `manifest.status=COMMITTED` and `quality_status=PASSED`. |
+
+This preserves the distinction:
+
+```text
+feature_snapshot exists != feature_snapshot is consumable
 ```
 
 ## 4. Contracts
