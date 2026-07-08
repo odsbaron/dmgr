@@ -95,7 +95,7 @@ sequenceDiagram
     DataStore-->>Pipeline: list[BarRecord]
     Pipeline->>Adapter: bars_to_factor_frame(bars)
     Adapter-->>Pipeline: pl.LazyFrame
-    Pipeline->>Registry: resolve_many(factor_ids, freq)
+    Pipeline->>Registry: resolve_many(factor_ids, parsed_freq)
     Registry-->>Pipeline: tuple[RegisteredFactor]
     Pipeline->>Runner: run(factor_frame, FactorRunConfig)
     Runner-->>Pipeline: factor result LazyFrame
@@ -142,8 +142,8 @@ Semantics:
 
 | Status | Meaning |
 |---|---|
-| `COMMITTED` | Feature rows and quality report were committed; quality is `PASSED` or `WARNING`. |
-| `QUALITY_FAILED` | Feature rows were committed, but quality report is `FAILED`. |
+| `COMMITTED` | Feature rows and quality report were committed; quality is `PASSED`; result is consumable. |
+| `QUALITY_FAILED` | Feature rows were committed, but quality is not `PASSED`; result is blocked from downstream consumption. |
 | `FAILED` | Pipeline failed before a usable feature result was committed. |
 
 `QUALITY_FAILED` is not a storage failure. It is an intentional audit state:
@@ -158,12 +158,9 @@ class ResearchRunRequest:
     feature_set_id: str
     input_data_ref: str
     factor_ids: tuple[str, ...]
-    dataset_id: str
-    freq: Frequency
     symbols: tuple[str, ...] | None = None
     as_of_start: datetime | None = None
     as_of_end: datetime | None = None
-    strict_quality: bool = True
     allow_failed_overwrite: bool = False
     prefix_probe_config: PrefixProbeConfig | None = None
     engine: str = "polars"
@@ -177,15 +174,21 @@ Validation rules:
 |---|---|
 | `factor_run_id` | Required and non-empty. |
 | `feature_set_id` | Required and non-empty. |
-| `input_data_ref` | Must parse as `duckdb://...`. |
+| `input_data_ref` | Must parse as `duckdb://curated_market_bar?...`. |
+| `input_data_ref.filters.dataset_id` | Required. It is the only source of dataset identity. |
+| `input_data_ref.filters.freq` | Required and must map to `Frequency`. It is the only source of frequency identity. |
 | `factor_ids` | Must not be empty. |
-| `dataset_id` | Required and non-empty. |
-| `symbols` | Optional consumer filter; empty tuple is invalid. |
+| `symbols` | Optional run-level filter; empty tuple is invalid. |
 | `as_of_start/as_of_end` | If both present, `as_of_start <= as_of_end`. |
 | `prefix_probe_config` | `None` disables dynamic prefix leakage probing. |
 
-`ResearchRunRequest` is converted into `FactorRunConfig` before calling the
-factor runner.
+`input_data_ref` is the authoritative source for the base data slice. The request
+keeps `symbols`, `as_of_start`, and `as_of_end` as run-level filters because the
+current `DataRef` supports simple equality filters only and should not become a
+range-query DSL in MVP-1.
+
+`ResearchRunRequest` is converted into `FactorRunConfig` only after the pipeline
+parses `dataset_id` and `freq` from `input_data_ref`.
 
 ### 6.3 `ResearchRunResult`
 
@@ -199,6 +202,8 @@ class ResearchRunResult:
     manifest_ref: DataRef | None
     quality_status: QualityStatus
     quality_summary: dict[str, Any]
+    consumable: bool
+    block_reason: str | None
     row_count_input: int
     row_count_feature: int
     row_count_snapshot: int
@@ -216,6 +221,8 @@ Result rules:
 | `snapshot_ref` | Present for successful feature commits. |
 | `manifest_ref` | Present after FeatureStore has written a manifest. |
 | `quality_status` | Mirrors the final committed `FactorQualityReport.status`. |
+| `consumable` | `True` only when `quality_status == PASSED`. |
+| `block_reason` | `None` when consumable; otherwise a short reason such as `quality_failed` or `pipeline_failed`. |
 | `metric_count` | Count of static quality metrics plus prefix probe metrics. |
 | `error_step` | Name of failing orchestration step, such as `read_bars`, `compute_factors`, or `commit_features`. |
 
@@ -296,12 +303,11 @@ def run(self, request: ResearchRunRequest) -> ResearchRunResult:
 Execution order:
 
 1. Validate `ResearchRunRequest`.
-2. Parse `input_data_ref`.
+2. Parse `input_data_ref` and extract `dataset_id` and `freq`.
 3. Read bars from `LocalDuckDBStore`.
-4. Apply request filters that are not already encoded in `input_data_ref`:
-   `symbols`, `as_of_start`, `as_of_end`.
+4. Apply request run-level filters: `symbols`, `as_of_start`, `as_of_end`.
 5. Convert bars to factor input frame.
-6. Resolve requested factors for `freq`.
+6. Resolve requested factors for parsed `freq`.
 7. Build `FactorRunConfig`.
 8. Run `PolarsFactorRunner`.
 9. Commit features through `LocalDuckDBFeatureStore.commit_run(...)`.
@@ -320,17 +326,19 @@ FactorRunConfig(
     feature_set_id=request.feature_set_id,
     input_data_ref=request.input_data_ref,
     factor_ids=request.factor_ids,
-    freq=request.freq,
-    dataset_id=request.dataset_id,
+    freq=parsed_freq,
+    dataset_id=parsed_dataset_id,
     as_of_start=request.as_of_start,
     as_of_end=request.as_of_end,
     symbols=request.symbols,
     engine=request.engine,
     execution_mode=request.execution_mode,
-    strict_quality=request.strict_quality,
     seed=request.seed,
 )
 ```
+
+The pipeline does not expose `strict_quality`. Quality checks always run, and
+non-`PASSED` quality always yields `consumable = False`.
 
 ## 9. Quality Metric Merge
 
@@ -348,7 +356,7 @@ Status rule:
 
 ```text
 any ERROR   -> FAILED
-any WARNING -> WARNING
+any WARNING -> FAILED
 otherwise  -> PASSED
 ```
 
@@ -357,6 +365,12 @@ The prefix detector already emits `FactorQualityMetric` rows through:
 ```python
 prefix_report_to_quality_metrics(report)
 ```
+
+In pipeline context, prefix probe warnings are blocking. If
+`prefix_probe_warning_count > 0`, the pipeline must treat the merged report as
+`FAILED` even if no value-change violation was found. The easiest first
+implementation is to escalate `prefix_probe_warning_count` from `WARNING` to
+`ERROR` before computing the merged report status.
 
 The merged report is the only report persisted:
 
@@ -379,7 +393,7 @@ This keeps `factor_quality_metric` as the single quality table.
 | feature commit validation | Use `FeatureCommitResult(status=FAILED)` and return its refs if present. |
 | static quality failure | `QUALITY_FAILED`, feature refs present, quality persisted. |
 | prefix leakage violation | `QUALITY_FAILED`, feature refs present, quality persisted. |
-| prefix probe warning only | `COMMITTED`, `quality_status=WARNING`. |
+| prefix probe warning only | `QUALITY_FAILED`, feature refs present, quality persisted. |
 
 Important distinction:
 
@@ -396,13 +410,13 @@ state.
 Default consumer policy:
 
 ```text
-quality_status == PASSED  -> allowed
-quality_status == WARNING -> allowed only if caller explicitly accepts warnings
-quality_status == FAILED  -> blocked
+quality_status == PASSED -> consumable = True
+otherwise                -> consumable = False
 ```
 
-This policy should later live in a small `features.gates` helper, not inside
-`FeatureStore` and not inside strategy code.
+There is no `allow_quality_warnings` switch in MVP-1. Non-`PASSED` quality is
+blocked from downstream backtest, strategy, and training consumption. Failed
+quality assets remain available for audit through their refs.
 
 ## 12. Testing Plan
 
@@ -429,6 +443,7 @@ Expected:
 ```text
 ResearchRunResult.status = COMMITTED
 quality_status = PASSED
+consumable = True
 feature_table_ref is not None
 snapshot_ref is not None
 manifest_ref is not None
@@ -449,6 +464,8 @@ Expected:
 ```text
 ResearchRunResult.status = QUALITY_FAILED
 quality_status = FAILED
+consumable = False
+block_reason = "quality_failed"
 factor_quality_metric contains null_ratio ERROR
 snapshot_ref exists for audit
 ```
@@ -466,6 +483,8 @@ Expected:
 ```text
 ResearchRunResult.status = QUALITY_FAILED
 quality_status = FAILED
+consumable = False
+block_reason = "quality_failed"
 factor_quality_metric contains prefix_invariance_violation_count ERROR
 ```
 
@@ -476,6 +495,9 @@ factor_quality_metric contains prefix_invariance_violation_count ERROR
 | empty `factor_run_id` | `validate_request` failure. |
 | empty `factor_ids` | `validate_request` failure. |
 | non-DuckDB `input_data_ref` | `parse_input_ref` failure. |
+| `input_data_ref.table != curated_market_bar` | `parse_input_ref` failure. |
+| missing `dataset_id` in `input_data_ref` | `parse_input_ref` failure. |
+| missing or unsupported `freq` in `input_data_ref` | `parse_input_ref` failure. |
 | `as_of_start > as_of_end` | `validate_request` failure. |
 
 ## 13. Implementation Order
