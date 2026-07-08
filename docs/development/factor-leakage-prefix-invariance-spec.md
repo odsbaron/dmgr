@@ -135,10 +135,10 @@ pl.col("close").rolling_mean(window_size=5).over("symbol")
 
 ## 4. Component Boundary
 
-Create a detector outside FeatureStore:
+Create a detector inside the feature quality package but outside FeatureStore:
 
 ```text
-quant_research.factors.leakage.PrefixInvarianceLeakageDetector
+quant_research.features.leakage.PrefixInvarianceLeakageDetector
 ```
 
 Responsibilities:
@@ -261,6 +261,13 @@ class PrefixLeakageExample:
 
 ```python
 @dataclass(frozen=True)
+class PrefixProbeWarning:
+    code: str
+    message: str
+    cutpoint: str | None = None
+
+
+@dataclass(frozen=True)
 class PrefixLeakageReport:
     factor_run_id: str
     feature_set_id: str
@@ -268,6 +275,11 @@ class PrefixLeakageReport:
     compared_value_count: int
     violation_count: int
     examples: tuple[PrefixLeakageExample, ...]
+    warnings: tuple[PrefixProbeWarning, ...] = ()
+    cutpoints: tuple[str, ...] = ()
+    cutpoint_mode: str = ""
+    compare_window_mode: str = ""
+    compare_tail_bars: int = 0
 ```
 
 ### 5.4 Detector Interface
@@ -401,9 +413,13 @@ as_of <= cutpoint
 
 The comparison window is selected by `compare_window_mode`.
 
+If a selected cutpoint produces fewer rows than `min_compare_rows`, skip that
+cutpoint and emit a probe warning instead of comparing a tiny, misleading sample.
+
 #### 6.3.1 `TAIL_BARS`
 
-`TAIL_BARS` compares only the last `compare_tail_bars` rows per symbol before each cutpoint.
+`TAIL_BARS` compares only the last `compare_tail_bars` rows per
+`dataset_id/symbol/freq` before each cutpoint.
 
 This still catches common leakage patterns:
 
@@ -500,6 +516,7 @@ New metric names:
 prefix_invariance_violation_count
 prefix_probe_cutpoint_count
 prefix_probe_compared_value_count
+prefix_probe_warning_count
 prefix_probe_changed_ratio
 ```
 
@@ -508,6 +525,7 @@ Severity:
 ```text
 prefix_invariance_violation_count > 0 -> ERROR
 prefix_probe_changed_ratio > 0         -> ERROR
+prefix_probe_warning_count > 0         -> WARNING
 all other probe metrics                -> INFO
 ```
 
@@ -534,6 +552,20 @@ all other probe metrics                -> INFO
       "output_field": "forward_ret_1",
       "prefix_value": null,
       "full_value": 0.0123
+    }
+  ]
+}
+```
+
+`metric_json` for `prefix_probe_warning_count`:
+
+```json
+{
+  "warnings": [
+    {
+      "code": "missing_explicit_cutpoint",
+      "message": "explicit cutpoint does not exist in input as_of values",
+      "cutpoint": "2026-07-10T07:00:00+00:00"
     }
   ]
 }

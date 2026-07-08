@@ -39,6 +39,8 @@ Implemented entry points:
 - `quant_research.features.transform.build_feature_snapshots`
 - `quant_research.features.duckdb_store.LocalDuckDBFeatureStore`
 - `quant_research.features.quality.FactorQualityAnalyzer`
+- `quant_research.features.leakage.PrefixInvarianceLeakageDetector`
+- `quant_research.features.leakage.prefix_report_to_quality_metrics`
 
 Next implementation lane:
 

@@ -418,6 +418,19 @@ rows up to a cutpoint and compare those historical values with the same rows
 computed from the full input. See
 `docs/development/factor-leakage-prefix-invariance-spec.md`.
 
+Current implementation entry points:
+
+```python
+from quant_research.features.leakage import (
+    PrefixInvarianceLeakageDetector,
+    prefix_report_to_quality_metrics,
+)
+```
+
+The dynamic probe writes compatible `factor_quality_metric` rows, including
+`prefix_invariance_violation_count`, `prefix_probe_compared_value_count`,
+`prefix_probe_warning_count`, and `prefix_probe_changed_ratio`.
+
 训练标签可以存在，但应该进入 label store 或 training dataset 的 label side，不应该混入 live feature store。
 
 未来行级增强：
