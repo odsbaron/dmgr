@@ -21,6 +21,7 @@ Development docs:
 - `docs/development/feature-store-spec.md`
 - `docs/development/factor-quality-checks.md`
 - `docs/development/factor-leakage-prefix-invariance-spec.md`
+- `docs/development/research-pipeline-development.md`
 - `docs/superpowers/plans/2026-07-08-research-pipeline-after-factor-quality.md`
 
 Implemented entry points:
