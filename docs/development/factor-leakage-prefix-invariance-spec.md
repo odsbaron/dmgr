@@ -166,11 +166,28 @@ Non-responsibilities:
 ### 5.1 Probe Config
 
 ```python
+class CutpointSelectionMode(StrEnum):
+    EVENLY_SPACED = "evenly_spaced"
+    PERIOD_END = "period_end"
+    EXPLICIT = "explicit"
+
+
+class CompareWindowMode(StrEnum):
+    TAIL_BARS = "tail_bars"
+    ALL_HISTORY = "all_history"
+
+
 @dataclass(frozen=True)
 class PrefixProbeConfig:
+    enabled: bool = True
+    cutpoint_mode: CutpointSelectionMode = CutpointSelectionMode.EVENLY_SPACED
     cutpoint_count: int = 5
+    explicit_cutpoints: tuple[str, ...] = ()
+    period: str | None = None
     min_prefix_rows: int = 20
+    compare_window_mode: CompareWindowMode = CompareWindowMode.TAIL_BARS
     compare_tail_bars: int = 20
+    min_compare_rows: int = 1
     rtol: float = 1e-9
     atol: float = 1e-12
     nulls_equal: bool = True
@@ -181,13 +198,48 @@ Field semantics:
 
 | Field | Meaning |
 |---|---|
-| `cutpoint_count` | Number of historical cutpoints to sample. |
+| `enabled` | Turns the dynamic prefix probe on or off. |
+| `cutpoint_mode` | Strategy for selecting historical cutpoints. |
+| `cutpoint_count` | Maximum number of cutpoints to sample when mode is `EVENLY_SPACED`. |
+| `explicit_cutpoints` | User-provided cutpoints when mode is `EXPLICIT`. |
+| `period` | Calendar bucket for `PERIOD_END`, such as `week`, `month`, or `quarter`. |
 | `min_prefix_rows` | Minimum input rows required before a cutpoint can be probed. |
+| `compare_window_mode` | Strategy for choosing rows to compare before each cutpoint. |
 | `compare_tail_bars` | Number of historical rows per symbol to compare near each cutpoint. |
+| `min_compare_rows` | Minimum comparable rows required for a probe result to be meaningful. |
 | `rtol` | Relative tolerance for numeric comparison. |
 | `atol` | Absolute tolerance for numeric comparison. |
 | `nulls_equal` | Treat null/null and NaN/NaN as equal. |
 | `max_examples` | Maximum changed-value examples to retain in metric JSON. |
+
+Recommended profiles:
+
+```python
+DAILY_PREFIX_PROBE = PrefixProbeConfig(
+    cutpoint_count=5,
+    min_prefix_rows=60,
+    compare_tail_bars=30,
+)
+
+MINUTE_PREFIX_PROBE = PrefixProbeConfig(
+    cutpoint_count=8,
+    min_prefix_rows=500,
+    compare_tail_bars=120,
+)
+
+FAST_CI_PREFIX_PROBE = PrefixProbeConfig(
+    cutpoint_count=2,
+    min_prefix_rows=30,
+    compare_tail_bars=20,
+)
+
+DEEP_AUDIT_PREFIX_PROBE = PrefixProbeConfig(
+    cutpoint_count=12,
+    min_prefix_rows=120,
+    compare_window_mode=CompareWindowMode.ALL_HISTORY,
+    compare_tail_bars=0,
+)
+```
 
 ### 5.2 Probe Example
 
@@ -267,6 +319,10 @@ prefix row count >= min_prefix_rows
 cutpoint is not the final as_of
 ```
 
+Then select cutpoints according to `PrefixProbeConfig.cutpoint_mode`.
+
+#### 6.2.1 `EVENLY_SPACED`
+
 Sample deterministic cutpoints across the usable history:
 
 ```text
@@ -277,6 +333,56 @@ else:
 ```
 
 No random sampling in MVP-1. Determinism matters for reproducible manifests.
+
+Example:
+
+```text
+usable as_of count = 250
+cutpoint_count = 5
+selected approximate positions = 20%, 40%, 60%, 80%, 100% of usable range
+```
+
+The final global `as_of` must still be excluded because appending no future rows cannot test leakage.
+
+#### 6.2.2 `PERIOD_END`
+
+`PERIOD_END` selects the last available `as_of` in each configured calendar bucket.
+
+Supported MVP-1 periods:
+
+```text
+week
+month
+quarter
+```
+
+Example:
+
+```python
+PrefixProbeConfig(
+    cutpoint_mode=CutpointSelectionMode.PERIOD_END,
+    period="month",
+    min_prefix_rows=60,
+)
+```
+
+This mode is useful when research workflows rebalance or retrain on calendar boundaries.
+
+#### 6.2.3 `EXPLICIT`
+
+`EXPLICIT` uses user-provided cutpoints:
+
+```python
+PrefixProbeConfig(
+    cutpoint_mode=CutpointSelectionMode.EXPLICIT,
+    explicit_cutpoints=(
+        "2026-03-31T07:00:00+00:00",
+        "2026-06-30T07:00:00+00:00",
+    ),
+)
+```
+
+Each explicit cutpoint must exist in the input `as_of` set after normal timestamp formatting. Missing explicit cutpoints should produce a probe warning metric, not silently shift to the nearest timestamp.
 
 ### 6.3 Prefix Recompute
 
@@ -293,7 +399,11 @@ Compare rows where:
 as_of <= cutpoint
 ```
 
-To limit cost, MVP-1 compares only the last `compare_tail_bars` rows per symbol before the cutpoint.
+The comparison window is selected by `compare_window_mode`.
+
+#### 6.3.1 `TAIL_BARS`
+
+`TAIL_BARS` compares only the last `compare_tail_bars` rows per symbol before each cutpoint.
 
 This still catches common leakage patterns:
 
@@ -304,10 +414,31 @@ This still catches common leakage patterns:
 | centered rolling | Rows near the cutpoint differ. |
 | full-sample scaling | Tail rows differ when future rows change global mean/std/max. |
 
+Recommended rule:
+
+```text
+compare_tail_bars should be >= the suspected future dependency horizon.
+```
+
+Examples:
+
+| Suspected leakage | Minimum useful `compare_tail_bars` |
+|---|---|
+| `shift(-1)` | 1 |
+| `shift(-5)` | 5 |
+| forward 20-bar label | 20 |
+| centered window size 20 | 10 |
+| unknown horizon | daily 30, minute 120 |
+
+#### 6.3.2 `ALL_HISTORY`
+
 If a project wants maximum sensitivity, set:
 
 ```python
-compare_tail_bars = 0
+PrefixProbeConfig(
+    compare_window_mode=CompareWindowMode.ALL_HISTORY,
+    compare_tail_bars=0,
+)
 ```
 
 Meaning:
@@ -315,6 +446,10 @@ Meaning:
 ```text
 compare all rows <= cutpoint
 ```
+
+This mode is slower, but it is the best option for deep audits and for detecting full-sample state such as global normalization.
+
+MVP-1 should treat `compare_tail_bars = 0` as an alias for `ALL_HISTORY` for backward compatibility with simple configs.
 
 ### 6.4 Key Alignment
 
@@ -382,6 +517,9 @@ all other probe metrics                -> INFO
 {
   "check_level": "prefix_recompute",
   "as_of_semantics": "factor_value_timestamp",
+  "cutpoint_mode": "evenly_spaced",
+  "compare_window_mode": "tail_bars",
+  "compare_tail_bars": 30,
   "cutpoints": [
     "2026-07-03T07:00:00+00:00"
   ],
@@ -556,6 +694,9 @@ Minimum tests:
 | Null/null comparison is stable | no violation for equal missing values. |
 | Multi-symbol prefix compare does not mix symbols | keys include `symbol`. |
 | Not enough cutpoints produces skipped INFO metrics | no ERROR when probe cannot run. |
+| `EVENLY_SPACED` cutpoint mode is deterministic | repeated probes choose identical cutpoints. |
+| `EXPLICIT` cutpoint mode rejects missing timestamps with warning metric | missing cutpoint is visible in report. |
+| `ALL_HISTORY` compare mode compares all rows before cutpoint | compared row count exceeds tail-window mode. |
 | Detector metrics can be merged into `FactorQualityReport` | `quality_status=FAILED` when violation exists. |
 
 Suggested fixture:
