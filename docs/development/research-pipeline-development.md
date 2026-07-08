@@ -2,7 +2,16 @@
 
 > Branch: `feature/factor-quality-metrics`
 > Scope: curated bars -> factor compute -> FeatureStore -> quality metrics -> research run result.
-> Status: implementation-ready spec for the next development slice.
+> Status: core service implemented; CLI and consumer-side quality gate are later slices.
+
+Current implementation slice:
+
+- `quant_research.pipeline.contracts.ResearchRunRequest`
+- `quant_research.pipeline.contracts.ResearchRunResult`
+- `quant_research.pipeline.contracts.ResearchRunStatus`
+- `quant_research.pipeline.bar_frame.bars_to_factor_frame`
+- `quant_research.pipeline.research.ResearchPipeline`
+- `quant_research.pipeline.research.merge_quality_reports`
 
 ## 1. Purpose
 

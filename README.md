@@ -42,10 +42,14 @@ Implemented entry points:
 - `quant_research.features.quality.FactorQualityAnalyzer`
 - `quant_research.features.leakage.PrefixInvarianceLeakageDetector`
 - `quant_research.features.leakage.prefix_report_to_quality_metrics`
+- `quant_research.pipeline.contracts.ResearchRunRequest`
+- `quant_research.pipeline.contracts.ResearchRunResult`
+- `quant_research.pipeline.bar_frame.bars_to_factor_frame`
+- `quant_research.pipeline.research.ResearchPipeline`
 
 Next implementation lane:
 
-- End-to-end research pipeline: `ingest -> factor compute -> feature store -> quality metrics`
+- Consumer-side quality gate and CLI wrapper for the research pipeline
 
 Supported factor authoring modes:
 
