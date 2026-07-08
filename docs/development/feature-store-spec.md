@@ -177,7 +177,7 @@ Reader-facing contract:
 | `dataset_id` | string | Input dataset. |
 | `symbol` | string | Instrument. |
 | `freq` | string | `1d`, `1m`, etc. |
-| `as_of` | string | ISO timestamp. |
+| `as_of` | string | Factor value timestamp as ISO string. |
 | `features` | dict | `{output_field: value}`. |
 | `factor_run_ids` | list[string] | Usually one run id in MVP-1. |
 | `input_data_refs` | list[string] | Source bar refs. |
@@ -224,7 +224,7 @@ Long format feature values.
 | `dataset_id` | text | Dataset. |
 | `symbol` | text | Instrument. |
 | `freq` | text | Frequency. |
-| `as_of` | text | ISO timestamp. |
+| `as_of` | text | Factor value timestamp as ISO string. |
 | `factor_id` | text | Factor id. |
 | `factor_version` | text | Factor version. |
 | `output_field` | text | Output field name. |
@@ -253,7 +253,7 @@ Strategy/replay-friendly feature view.
 | `dataset_id` | text | Dataset. |
 | `symbol` | text | Instrument. |
 | `freq` | text | Frequency. |
-| `as_of` | text | ISO timestamp. |
+| `as_of` | text | Factor value timestamp as ISO string. |
 | `features_json` | text | `{output_field: value}`. |
 | `factor_run_ids_json` | text | JSON array. |
 | `input_data_refs_json` | text | JSON array. |
@@ -503,6 +503,7 @@ Detailed implementation guide:
 
 ```text
 docs/development/factor-quality-checks.md
+docs/development/factor-leakage-prefix-invariance-spec.md
 ```
 
 Current implementation writes `factor_quality_metric` through:

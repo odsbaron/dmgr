@@ -243,6 +243,12 @@ Each output row is valid at `as_of`, where:
 as_of = input bar_end_time
 ```
 
+`as_of` is the factor value timestamp: it says which bar or event the
+computed value belongs to. It is not the earliest strategy consumption time,
+data availability time, or system write time. Future availability semantics
+should use separate fields such as `available_at`, `input_window_start`, and
+`input_window_end`.
+
 No factor may use bars where:
 
 ```text
@@ -250,6 +256,10 @@ bar_end_time > as_of
 ```
 
 Forward returns, labels, or target variables must live in a separate label layer, not in the factor layer.
+
+Dynamic leakage checks should verify prefix invariance: recomputing a factor on
+rows with `as_of <= t` must produce the same historical values as recomputing it
+on the full input and then filtering to `as_of <= t`.
 
 ### 7.2 Warmup
 

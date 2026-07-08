@@ -408,9 +408,15 @@ metric_json：
 重要区分：
 
 ```text
-可交易特征: as_of 时刻或之前可获得的数据计算出来的值
+可交易特征: 因子值归属于 as_of，且追加 as_of 之后的数据不会改变该历史值
 训练标签: as_of 之后的收益、回撤、方向、成交结果
 ```
+
+Here `as_of` is the factor value timestamp, not the data availability timestamp.
+Dynamic leakage detection should use prefix recomputation: compute the factor on
+rows up to a cutpoint and compare those historical values with the same rows
+computed from the full input. See
+`docs/development/factor-leakage-prefix-invariance-spec.md`.
 
 训练标签可以存在，但应该进入 label store 或 training dataset 的 label side，不应该混入 live feature store。
 
@@ -679,4 +685,3 @@ forward_ret_1:
   severity = ERROR
   manifest.quality_status = FAILED
 ```
-

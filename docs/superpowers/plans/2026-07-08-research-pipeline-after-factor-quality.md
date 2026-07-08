@@ -225,7 +225,7 @@ def bars_to_factor_frame(bars: Iterable[BarRecord]) -> pl.LazyFrame:
             "asset_class": bar.asset_class.value,
             "freq": bar.freq.value,
             "trading_date": bar.trading_date.isoformat(),
-            "as_of": bar.bar_start_time,
+            "as_of": bar.bar_end_time,
             "bar_start_time": bar.bar_start_time,
             "bar_end_time": bar.bar_end_time,
             "open": float(bar.open),
