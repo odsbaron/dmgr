@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 import pytest
 
 from quant_research.contracts.bar import Frequency
+from quant_research.factors.contracts import FactorRunConfig
 from quant_research.features.quality import QualityStatus
 from quant_research.pipeline.contracts import (
     PipelineInputRefError,
@@ -36,6 +37,15 @@ def test_research_run_request_keeps_dataset_and_freq_inside_data_ref():
 
 
 def test_research_run_request_validates_run_level_filters():
+    with pytest.raises(ValueError, match="universe_ref must not be empty"):
+        ResearchRunRequest(
+            factor_run_id="factor-run-1",
+            feature_set_id="basic_price_v1",
+            input_data_ref="duckdb://curated_market_bar?dataset_id=fixture-daily&freq=1d",
+            factor_ids=("ret_1",),
+            universe_ref="",
+        )
+
     with pytest.raises(ValueError, match="symbols must not be empty"):
         ResearchRunRequest(
             factor_run_id="factor-run-1",
@@ -85,3 +95,29 @@ def test_research_run_result_marks_non_passed_quality_as_not_consumable():
 
     assert result.consumable is False
     assert result.block_reason == "quality_failed"
+
+
+def test_factor_run_config_requires_complete_exact_market_data_lineage():
+    common = {
+        "factor_run_id": "factor-run-1",
+        "feature_set_id": "basic_price_v1",
+        "input_data_ref": "duckdb://curated_market_bar?snapshot_set_id=set-1",
+        "factor_ids": ("ret_1",),
+        "freq": Frequency.D1,
+        "dataset_id": "fixture-daily",
+    }
+
+    with pytest.raises(ValueError, match="complete market-data lineage"):
+        FactorRunConfig(**common, market_data_ref=common["input_data_ref"])
+
+    with pytest.raises(ValueError, match="requires market_data_ref"):
+        FactorRunConfig(**common, market_dataset_version="v1")
+
+    config = FactorRunConfig(
+        **common,
+        market_data_ref=common["input_data_ref"],
+        market_dataset_version="v1",
+        market_data_definition_hash="sha256:definition",
+        market_data_snapshot_set_hash="sha256:set",
+    )
+    assert config.market_dataset_version == "v1"

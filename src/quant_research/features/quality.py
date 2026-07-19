@@ -4,6 +4,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from math import isfinite
 from typing import Any
 
 from quant_research.factors.registry import RegisteredFactor
@@ -69,6 +70,7 @@ class FactorQualityAnalyzer:
 
         created_at = datetime.now(UTC).isoformat()
         metrics: list[FactorQualityMetric] = []
+        expected_symbols = {value.symbol for value in values}
         for registered in resolved_factors:
             for output_field in registered.spec.output_fields:
                 scoped_values = [
@@ -78,7 +80,13 @@ class FactorQualityAnalyzer:
                     and value.output_field == output_field
                 ]
                 metrics.extend(
-                    self._metrics_for_output(registered, output_field, scoped_values, created_at)
+                    self._metrics_for_output(
+                        registered,
+                        output_field,
+                        scoped_values,
+                        expected_symbols,
+                        created_at,
+                    )
                 )
 
         status = self._status(metrics)
@@ -94,6 +102,7 @@ class FactorQualityAnalyzer:
         registered: RegisteredFactor,
         output_field: str,
         values: list[FeatureValue],
+        expected_symbols: set[str],
         created_at: str,
     ) -> list[FactorQualityMetric]:
         spec = registered.spec
@@ -102,7 +111,18 @@ class FactorQualityAnalyzer:
         null_ratio = null_count / row_count if row_count else 1.0
         max_null_ratio = float(spec.quality_rules.get("max_null_ratio", 1.0))
         warmup_incomplete_count = sum(1 for value in values if not value.warmup_complete)
+        observed_symbols = {value.symbol for value in values if value.value_kind != "null"}
+        symbol_coverage_ratio = (
+            len(observed_symbols) / len(expected_symbols) if expected_symbols else 0.0
+        )
         duplicate_count = self._duplicate_count(values)
+        max_abs_value = float(spec.quality_rules.get("max_abs_value", float("inf")))
+        extreme_value_count = sum(
+            1
+            for value in values
+            if value.value_float is not None
+            and (not isfinite(value.value_float) or abs(value.value_float) > max_abs_value)
+        )
         forward_bars = int(spec.quality_rules.get("forward_bars", 0) or 0)
         uses_future_data = bool(spec.quality_rules.get("uses_future_data", False))
         causal = spec.quality_rules.get("causal", True)
@@ -110,7 +130,9 @@ class FactorQualityAnalyzer:
         future_leakage_count = row_count if is_forward_calculation else 0
 
         return [
-            self._metric(spec.factor_id, output_field, values, "row_count", row_count, {}, created_at),
+            self._metric(
+                spec.factor_id, output_field, values, "row_count", row_count, {}, created_at
+            ),
             self._metric(
                 spec.factor_id,
                 output_field,
@@ -134,11 +156,51 @@ class FactorQualityAnalyzer:
                 spec.factor_id,
                 output_field,
                 values,
+                "symbol_count",
+                len(observed_symbols),
+                {"expected_symbol_count": len(expected_symbols)},
+                created_at,
+            ),
+            self._metric(
+                spec.factor_id,
+                output_field,
+                values,
+                "symbol_coverage_ratio",
+                symbol_coverage_ratio,
+                {
+                    "observed_symbol_count": len(observed_symbols),
+                    "expected_symbol_count": len(expected_symbols),
+                },
+                created_at,
+            ),
+            self._metric(
+                spec.factor_id,
+                output_field,
+                values,
+                "warmup_drop_count",
+                warmup_incomplete_count,
+                {},
+                created_at,
+            ),
+            self._metric(
+                spec.factor_id,
+                output_field,
+                values,
                 "duplicate_key_count",
                 duplicate_count,
                 {},
                 created_at,
                 QualitySeverity.ERROR if duplicate_count else QualitySeverity.INFO,
+            ),
+            self._metric(
+                spec.factor_id,
+                output_field,
+                values,
+                "extreme_value_count",
+                extreme_value_count,
+                {"max_abs_value": (max_abs_value if isfinite(max_abs_value) else None)},
+                created_at,
+                QualitySeverity.ERROR if extreme_value_count else QualitySeverity.INFO,
             ),
             self._metric(
                 spec.factor_id,

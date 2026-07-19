@@ -1,4 +1,7 @@
-from datetime import UTC, date, datetime
+import json
+from datetime import UTC, date, datetime, timedelta
+
+import pytest
 
 from quant_research.contracts.bar import Adjustment, AssetClass, BarRecord, Frequency
 from quant_research.contracts.import_run import ImportRun, ImportStatus
@@ -89,3 +92,36 @@ def test_import_run_and_quality_issue_contracts():
 
     assert run.status == ImportStatus.CREATED
     assert issue.is_blocking
+
+
+@pytest.mark.parametrize(
+    ("freq", "duration"),
+    [(Frequency.D1, timedelta(hours=5, minutes=30)), (Frequency.M1, timedelta(minutes=1))],
+)
+def test_bar_record_roundtrip_preserves_daily_and_minute_contracts(freq, duration):
+    start = datetime(2026, 7, 7, 1, 30, tzinfo=UTC)
+    bar = BarRecord(
+        dataset_id="fixture",
+        symbol="000001.SZ",
+        exchange="SZSE",
+        asset_class=AssetClass.EQUITY,
+        freq=freq,
+        trading_date=date(2026, 7, 7),
+        bar_start_time=start,
+        bar_end_time=start + duration,
+        open="10.0000",
+        high="10.5000",
+        low="9.9000",
+        close="10.2000",
+        volume="100000",
+        turnover=None,
+        adjustment=Adjustment.NONE,
+        source="fixture",
+        source_run_id="run-1",
+        source_row_id="1",
+        raw_ref="raw://fixture/run-1/1",
+    )
+
+    payload = json.loads(json.dumps(bar.to_dict()))
+
+    assert BarRecord.from_dict(payload) == bar

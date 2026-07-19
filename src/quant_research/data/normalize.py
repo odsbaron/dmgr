@@ -5,7 +5,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from quant_research.contracts.bar import AssetClass, BarRecord, Frequency
-from quant_research.contracts.source import SourceSpec
+from quant_research.contracts.source import BarTimestampConvention, SourceSpec
 from quant_research.data.readers.base import RawKLineRow
 
 
@@ -71,12 +71,16 @@ class BarNormalizer:
         start_local = datetime.fromisoformat(raw_timestamp)
         if start_local.tzinfo is None:
             start_local = start_local.replace(tzinfo=zone)
-        start = start_local.astimezone(UTC)
-        end = start + _FREQ_TO_DELTA[spec.freq]
+        timestamp = start_local.astimezone(UTC)
+        if spec.bar_timestamp_convention == BarTimestampConvention.START_TIME:
+            start = timestamp
+            end = start + _FREQ_TO_DELTA[spec.freq]
+        else:
+            end = timestamp
+            start = end - _FREQ_TO_DELTA[spec.freq]
         return start, end, start_local.date()
 
     def _asset_class(self, exchange: str) -> AssetClass:
         if exchange in {"CFFEX", "SHFE", "DCE", "CZCE", "INE", "GFEX"}:
             return AssetClass.FUTURE
         return AssetClass.EQUITY
-

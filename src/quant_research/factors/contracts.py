@@ -16,6 +16,27 @@ class ComputeMode(StrEnum):
 
 
 @dataclass(frozen=True)
+class FactorContext:
+    input_data_ref: str
+    dataset_id: str
+    freq: Frequency
+    as_of_start: datetime | None = None
+    as_of_end: datetime | None = None
+    symbols: tuple[str, ...] | None = None
+
+    @classmethod
+    def from_run_config(cls, config: "FactorRunConfig") -> "FactorContext":
+        return cls(
+            input_data_ref=config.input_data_ref,
+            dataset_id=config.dataset_id,
+            freq=config.freq,
+            as_of_start=config.as_of_start,
+            as_of_end=config.as_of_end,
+            symbols=config.symbols,
+        )
+
+
+@dataclass(frozen=True)
 class FactorSpec:
     factor_id: str
     version: str
@@ -64,6 +85,15 @@ class FactorRunConfig:
     execution_mode: str = "lazy"
     strict_quality: bool = True
     seed: int | None = None
+    universe_ref: str | None = None
+    universe_id: str | None = None
+    universe_version: str | None = None
+    universe_definition_hash: str | None = None
+    universe_snapshot_set_hash: str | None = None
+    market_data_ref: str | None = None
+    market_dataset_version: str | None = None
+    market_data_definition_hash: str | None = None
+    market_data_snapshot_set_hash: str | None = None
 
     def __post_init__(self) -> None:
         if not self.factor_run_id:
@@ -74,3 +104,22 @@ class FactorRunConfig:
             raise ValueError("input_data_ref must be a duckdb DataRef")
         if not self.factor_ids:
             raise ValueError("factor_ids must not be empty")
+        lineage = (
+            self.universe_id,
+            self.universe_version,
+            self.universe_definition_hash,
+            self.universe_snapshot_set_hash,
+        )
+        if self.universe_ref is None and any(value is not None for value in lineage):
+            raise ValueError("Universe lineage requires universe_ref")
+        if self.universe_ref is not None and any(value is None for value in lineage):
+            raise ValueError("universe_ref requires complete Universe lineage")
+        market_data_lineage = (
+            self.market_dataset_version,
+            self.market_data_definition_hash,
+            self.market_data_snapshot_set_hash,
+        )
+        if self.market_data_ref is None and any(value is not None for value in market_data_lineage):
+            raise ValueError("market-data lineage requires market_data_ref")
+        if self.market_data_ref is not None and any(value is None for value in market_data_lineage):
+            raise ValueError("market_data_ref requires complete market-data lineage")

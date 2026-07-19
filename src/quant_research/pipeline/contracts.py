@@ -21,11 +21,26 @@ class PipelineInputRefError(ValueError):
     pass
 
 
+class PipelineUniverseError(ValueError):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+class PipelineMarketDataError(ValueError):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
 @dataclass(frozen=True)
 class PipelineInputSlice:
     data_ref: DataRef
     dataset_id: str
     freq: Frequency
+    dataset_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -34,6 +49,7 @@ class ResearchRunRequest:
     feature_set_id: str
     input_data_ref: str
     factor_ids: tuple[str, ...]
+    universe_ref: str | None = None
     symbols: tuple[str, ...] | None = None
     as_of_start: datetime | None = None
     as_of_end: datetime | None = None
@@ -52,6 +68,8 @@ class ResearchRunRequest:
             raise ValueError("input_data_ref is required")
         if not self.factor_ids:
             raise ValueError("factor_ids must not be empty")
+        if self.universe_ref is not None and not self.universe_ref.strip():
+            raise ValueError("universe_ref must not be empty")
         if self.symbols == ():
             raise ValueError("symbols must not be empty")
         if (

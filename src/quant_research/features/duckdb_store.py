@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
 
 import duckdb
+import polars as pl
 
+from quant_research import __version__
 from quant_research.contracts.refs import DataRef
 from quant_research.features.contracts import (
     FeatureCommitRequest,
@@ -16,7 +19,11 @@ from quant_research.features.contracts import (
     FeatureStoreError,
     FeatureValue,
 )
-from quant_research.features.quality import FactorQualityMetric, FactorQualityReport, QualitySeverity
+from quant_research.features.quality import (
+    FactorQualityMetric,
+    FactorQualityReport,
+    QualitySeverity,
+)
 from quant_research.features.transform import build_feature_snapshots, wide_to_feature_values
 
 
@@ -26,6 +33,7 @@ _FEATURE_VALUE_COLUMNS = (
     "dataset_id",
     "symbol",
     "freq",
+    "trading_date",
     "as_of",
     "factor_id",
     "factor_version",
@@ -75,6 +83,18 @@ _MANIFEST_COLUMNS = (
     "quality_summary_json",
     "error_code",
     "error_message",
+    "universe_ref",
+    "universe_id",
+    "universe_version",
+    "universe_definition_hash",
+    "universe_snapshot_set_hash",
+    "market_data_ref",
+    "market_dataset_version",
+    "market_data_definition_hash",
+    "market_data_snapshot_set_hash",
+    "code_version",
+    "config_hash",
+    "quality_report_ref",
 )
 
 _QUALITY_METRIC_COLUMNS = (
@@ -112,7 +132,11 @@ class LocalDuckDBFeatureStore:
                 error_code="FEATURE_RUN_ALREADY_COMMITTED",
                 error_message="feature run is already committed",
             )
-        if existing and existing.status == FeatureRunStatus.FAILED and not request.allow_failed_overwrite:
+        if (
+            existing
+            and existing.status == FeatureRunStatus.FAILED
+            and not request.allow_failed_overwrite
+        ):
             return self._failed_result(
                 request,
                 "FEATURE_RUN_ALREADY_FAILED",
@@ -155,6 +179,24 @@ class LocalDuckDBFeatureStore:
             row_count_snapshot=len(snapshots),
         )
 
+    def commit_failed_run(
+        self,
+        config,
+        *,
+        error_code: str,
+        error_message: str,
+        input_row_count: int = 0,
+        resolved_factors=(),
+    ) -> FeatureCommitResult:
+        request = FeatureCommitRequest(
+            config=config,
+            factor_frame=pl.DataFrame().lazy(),
+            resolved_factors=tuple(resolved_factors),
+            input_row_count=input_row_count,
+            allow_failed_overwrite=True,
+        )
+        return self._failed_result(request, error_code, error_message)
+
     def get_manifest(self, factor_run_id: str) -> FeatureRunManifest | None:
         with self._connect() as conn:
             row = conn.execute(
@@ -179,12 +221,16 @@ class LocalDuckDBFeatureStore:
                 conn.execute(
                     """
                     UPDATE factor_run_manifest
-                    SET quality_status = ?, quality_summary_json = ?
+                    SET quality_status = ?, quality_summary_json = ?, quality_report_ref = ?
                     WHERE factor_run_id = ?
                     """,
                     [
                         report.status.value,
                         json.dumps(report.summary, sort_keys=True),
+                        DataRef(
+                            "factor_quality_metric",
+                            {"factor_run_id": report.factor_run_id},
+                        ).uri,
                         report.factor_run_id,
                     ],
                 )
@@ -263,10 +309,40 @@ class LocalDuckDBFeatureStore:
                     quality_status VARCHAR NOT NULL,
                     quality_summary_json VARCHAR NOT NULL,
                     error_code VARCHAR,
-                    error_message VARCHAR
+                    error_message VARCHAR,
+                    universe_ref VARCHAR,
+                    universe_id VARCHAR,
+                    universe_version VARCHAR,
+                    universe_definition_hash VARCHAR,
+                    universe_snapshot_set_hash VARCHAR,
+                    market_data_ref VARCHAR,
+                    market_dataset_version VARCHAR,
+                    market_data_definition_hash VARCHAR,
+                    market_data_snapshot_set_hash VARCHAR,
+                    code_version VARCHAR,
+                    config_hash VARCHAR,
+                    quality_report_ref VARCHAR
                 )
                 """
             )
+            for column in (
+                "universe_ref",
+                "universe_id",
+                "universe_version",
+                "universe_definition_hash",
+                "universe_snapshot_set_hash",
+                "market_data_ref",
+                "market_dataset_version",
+                "market_data_definition_hash",
+                "market_data_snapshot_set_hash",
+            ):
+                conn.execute(
+                    f"ALTER TABLE factor_run_manifest ADD COLUMN IF NOT EXISTS {column} VARCHAR"
+                )
+            for column in ("code_version", "config_hash", "quality_report_ref"):
+                conn.execute(
+                    f"ALTER TABLE factor_run_manifest ADD COLUMN IF NOT EXISTS {column} VARCHAR"
+                )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS feature_table (
@@ -275,6 +351,7 @@ class LocalDuckDBFeatureStore:
                     dataset_id VARCHAR NOT NULL,
                     symbol VARCHAR NOT NULL,
                     freq VARCHAR NOT NULL,
+                    trading_date VARCHAR,
                     as_of VARCHAR NOT NULL,
                     factor_id VARCHAR NOT NULL,
                     factor_version VARCHAR NOT NULL,
@@ -287,6 +364,20 @@ class LocalDuckDBFeatureStore:
                     input_data_ref VARCHAR NOT NULL,
                     created_at VARCHAR NOT NULL
                 )
+                """
+            )
+            conn.execute("ALTER TABLE feature_table ADD COLUMN IF NOT EXISTS trading_date VARCHAR")
+            conn.execute(
+                """
+                UPDATE feature_table
+                SET trading_date = substr(as_of, 1, 10)
+                WHERE trading_date IS NULL OR trading_date = ''
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_feature_table_research_lookup
+                ON feature_table (dataset_id, feature_set_id, freq, trading_date, symbol)
                 """
             )
             conn.execute(
@@ -397,6 +488,17 @@ class LocalDuckDBFeatureStore:
             row_count_snapshot=row_count_snapshot,
             error_code=error_code,
             error_message=error_message,
+            universe_ref=request.config.universe_ref,
+            universe_id=request.config.universe_id,
+            universe_version=request.config.universe_version,
+            universe_definition_hash=request.config.universe_definition_hash,
+            universe_snapshot_set_hash=request.config.universe_snapshot_set_hash,
+            market_data_ref=request.config.market_data_ref,
+            market_dataset_version=request.config.market_dataset_version,
+            market_data_definition_hash=request.config.market_data_definition_hash,
+            market_data_snapshot_set_hash=request.config.market_data_snapshot_set_hash,
+            code_version=__version__,
+            config_hash=self._config_hash(request),
         )
 
     def _replace_manifest(self, conn, manifest: FeatureRunManifest) -> None:
@@ -487,9 +589,7 @@ class LocalDuckDBFeatureStore:
             raise ValueError(f"unsupported filters: {sorted(unsupported)}")
         if not filters:
             return "", []
-        return "WHERE " + " AND ".join(f"{field} = ?" for field in filters), list(
-            filters.values()
-        )
+        return "WHERE " + " AND ".join(f"{field} = ?" for field in filters), list(filters.values())
 
     def _snapshot_where_clause(self, filters: dict[str, str]) -> tuple[str, list[str]]:
         allowed = {"feature_set_id", "factor_run_id", "dataset_id", "symbol", "freq", "as_of"}
@@ -514,6 +614,7 @@ class LocalDuckDBFeatureStore:
             value.dataset_id,
             value.symbol,
             value.freq,
+            value.trading_date or value.as_of[:10],
             value.as_of,
             value.factor_id,
             value.factor_version,
@@ -534,17 +635,18 @@ class LocalDuckDBFeatureStore:
             dataset_id=row[2],
             symbol=row[3],
             freq=row[4],
-            as_of=row[5],
-            factor_id=row[6],
-            factor_version=row[7],
-            output_field=row[8],
-            value_float=row[9],
-            value_string=row[10],
-            value_kind=row[11],
-            warmup_complete=row[12],
-            quality_flags=tuple(json.loads(row[13])),
-            input_data_ref=row[14],
-            created_at=row[15],
+            trading_date=row[5],
+            as_of=row[6],
+            factor_id=row[7],
+            factor_version=row[8],
+            output_field=row[9],
+            value_float=row[10],
+            value_string=row[11],
+            value_kind=row[12],
+            warmup_complete=row[13],
+            quality_flags=tuple(json.loads(row[14])),
+            input_data_ref=row[15],
+            created_at=row[16],
         )
 
     def _snapshot_to_row(self, snapshot: FeatureSnapshot) -> tuple[object, ...]:
@@ -605,6 +707,18 @@ class LocalDuckDBFeatureStore:
             json.dumps(manifest.quality_summary, sort_keys=True),
             manifest.error_code,
             manifest.error_message,
+            manifest.universe_ref,
+            manifest.universe_id,
+            manifest.universe_version,
+            manifest.universe_definition_hash,
+            manifest.universe_snapshot_set_hash,
+            manifest.market_data_ref,
+            manifest.market_dataset_version,
+            manifest.market_data_definition_hash,
+            manifest.market_data_snapshot_set_hash,
+            manifest.code_version,
+            manifest.config_hash,
+            manifest.quality_report_ref,
         )
 
     def _row_to_manifest(self, row) -> FeatureRunManifest:
@@ -615,9 +729,7 @@ class LocalDuckDBFeatureStore:
             freq=row[3],
             input_data_refs=tuple(json.loads(row[4])),
             factor_versions=json.loads(row[5]),
-            factor_output_fields={
-                key: tuple(value) for key, value in json.loads(row[6]).items()
-            },
+            factor_output_fields={key: tuple(value) for key, value in json.loads(row[6]).items()},
             engine=row[7],
             execution_mode=row[8],
             status=FeatureRunStatus(row[9]),
@@ -630,7 +742,41 @@ class LocalDuckDBFeatureStore:
             quality_summary=json.loads(row[16]),
             error_code=row[17],
             error_message=row[18],
+            universe_ref=row[19],
+            universe_id=row[20],
+            universe_version=row[21],
+            universe_definition_hash=row[22],
+            universe_snapshot_set_hash=row[23],
+            market_data_ref=row[24],
+            market_dataset_version=row[25],
+            market_data_definition_hash=row[26],
+            market_data_snapshot_set_hash=row[27],
+            code_version=row[28] or __version__,
+            config_hash=row[29] or "",
+            quality_report_ref=row[30],
         )
+
+    def _config_hash(self, request: FeatureCommitRequest) -> str:
+        config = request.config
+        payload = {
+            "feature_set_id": config.feature_set_id,
+            "input_data_ref": config.input_data_ref,
+            "factor_ids": list(config.factor_ids),
+            "factor_versions": {
+                registered.spec.factor_id: registered.spec.version
+                for registered in request.resolved_factors
+            },
+            "freq": config.freq.value,
+            "dataset_id": config.dataset_id,
+            "as_of_start": config.as_of_start.isoformat() if config.as_of_start else None,
+            "as_of_end": config.as_of_end.isoformat() if config.as_of_end else None,
+            "symbols": list(config.symbols) if config.symbols else None,
+            "engine": config.engine,
+            "execution_mode": config.execution_mode,
+            "seed": config.seed,
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
     def _quality_metric_to_row(self, metric: FactorQualityMetric) -> tuple[object, ...]:
         return (

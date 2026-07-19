@@ -18,6 +18,7 @@ def spec(
     max_null_ratio: float = 0.5,
     forward_bars: int = 0,
     causal: bool | None = None,
+    max_abs_value: float | None = None,
 ) -> RegisteredFactor:
     is_causal = forward_bars == 0 if causal is None else causal
     return RegisteredFactor(
@@ -36,6 +37,7 @@ def spec(
                 "max_null_ratio": max_null_ratio,
                 "forward_bars": forward_bars,
                 "causal": is_causal,
+                **({"max_abs_value": max_abs_value} if max_abs_value is not None else {}),
             },
         ),
         compute=None,
@@ -49,13 +51,14 @@ def value(
     index: int,
     value_float: float | None,
     warmup_complete: bool = True,
+    symbol: str = "000001.SZ",
 ) -> FeatureValue:
     as_of = datetime(2026, 7, 1, 7, 0, tzinfo=UTC) + timedelta(days=index)
     return FeatureValue(
         factor_run_id="factor-run-1",
         feature_set_id="basic_price_v1",
         dataset_id="fixture-daily",
-        symbol="000001.SZ",
+        symbol=symbol,
         freq="1d",
         as_of=as_of.isoformat(),
         factor_id=factor_id,
@@ -163,4 +166,24 @@ def test_quality_analyzer_detects_duplicate_feature_keys():
     duplicate_count = metric(report, "ret_1", "ret_1", "duplicate_key_count")
     assert duplicate_count.metric_value == 1
     assert duplicate_count.severity == QualitySeverity.ERROR
+    assert report.status == QualityStatus.FAILED
+
+
+def test_quality_analyzer_reports_symbol_coverage_warmup_drops_and_extremes():
+    values = [
+        value(index=0, symbol="A", value_float=100.0, warmup_complete=False),
+        value(index=0, symbol="B", value_float=None),
+    ]
+
+    report = FactorQualityAnalyzer().analyze(
+        values,
+        (spec("ret_1", max_null_ratio=1.0, max_abs_value=10.0),),
+    )
+
+    assert metric(report, "ret_1", "ret_1", "symbol_count").metric_value == 1
+    assert metric(report, "ret_1", "ret_1", "symbol_coverage_ratio").metric_value == 0.5
+    assert metric(report, "ret_1", "ret_1", "warmup_drop_count").metric_value == 1
+    extreme = metric(report, "ret_1", "ret_1", "extreme_value_count")
+    assert extreme.metric_value == 1
+    assert extreme.severity == QualitySeverity.ERROR
     assert report.status == QualityStatus.FAILED

@@ -1,7 +1,9 @@
+from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 
 from quant_research.contracts.bar import Adjustment, Frequency
-from quant_research.contracts.source import SourceSpec, SourceType
+from quant_research.contracts.source import BarTimestampConvention, SourceSpec, SourceType
 from quant_research.data.normalize import BarNormalizer
 from quant_research.data.quality import KLineQualityValidator
 from quant_research.data.readers.csv_reader import CSVKLineReader
@@ -83,6 +85,21 @@ def test_normalizer_preserves_minute_timestamp():
     assert bar.bar_end_time.isoformat() == "2026-07-07T01:31:00+00:00"
 
 
+def test_normalizer_supports_end_time_timestamp_convention():
+    fixture = Path("tests/fixtures/bars_1m.csv")
+    spec = minute_spec(fixture)
+    end_time_spec = replace(
+        spec,
+        bar_timestamp_convention=BarTimestampConvention.END_TIME,
+    )
+    row = next(CSVKLineReader().read_rows(end_time_spec))
+
+    bar = BarNormalizer(import_run_id="run-1").normalize(row, end_time_spec)
+
+    assert bar.bar_start_time.isoformat() == "2026-07-07T01:29:00+00:00"
+    assert bar.bar_end_time.isoformat() == "2026-07-07T01:30:00+00:00"
+
+
 def test_quality_validator_reports_duplicate_and_invalid_ohlc():
     fixture = Path("tests/fixtures/bars_daily.csv")
     spec = daily_spec(fixture)
@@ -100,3 +117,43 @@ def test_quality_validator_reports_duplicate_and_invalid_ohlc():
     assert "DUPLICATE_BAR" in codes
     assert "INVALID_OHLC" in codes
     assert report.has_blocking_errors
+
+
+def test_quality_validator_reports_out_of_order_and_missing_minute_window():
+    fixture = Path("tests/fixtures/bars_1m.csv")
+    spec = minute_spec(fixture)
+    normalizer = BarNormalizer(import_run_id="run-1")
+    first, second = [normalizer.normalize(row, spec) for row in CSVKLineReader().read_rows(spec)]
+    gapped_second = replace(
+        second,
+        bar_start_time=second.bar_start_time + timedelta(minutes=1),
+        bar_end_time=second.bar_end_time + timedelta(minutes=1),
+    )
+
+    gap_report = KLineQualityValidator(
+        import_run_id="run-1",
+        calendar_id=spec.calendar_id,
+        timezone=spec.timezone,
+    ).validate([first, gapped_second])
+    order_report = KLineQualityValidator(import_run_id="run-1").validate([second, first])
+
+    gap_issue = next(
+        issue for issue in gap_report.issues if issue.issue_code == "MISSING_BAR_WINDOW"
+    )
+    assert "missing 1 expected 1m window" in gap_issue.message
+    assert any(issue.issue_code == "OUT_OF_ORDER_BAR" for issue in order_report.issues)
+
+
+def test_quality_validator_accepts_contiguous_minute_windows():
+    fixture = Path("tests/fixtures/bars_1m.csv")
+    spec = minute_spec(fixture)
+    normalizer = BarNormalizer(import_run_id="run-1")
+    bars = [normalizer.normalize(row, spec) for row in CSVKLineReader().read_rows(spec)]
+
+    report = KLineQualityValidator(
+        import_run_id="run-1",
+        calendar_id=spec.calendar_id,
+        timezone=spec.timezone,
+    ).validate(bars)
+
+    assert not any(issue.issue_code == "MISSING_BAR_WINDOW" for issue in report.issues)
