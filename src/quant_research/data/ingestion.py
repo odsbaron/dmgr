@@ -12,10 +12,20 @@ from quant_research.contracts.import_run import ImportRun, ImportStatus
 from quant_research.contracts.quality import QualityReport
 from quant_research.contracts.refs import DataRef
 from quant_research.contracts.source import SourceSpec, SourceType
+from quant_research.data.duckdb_store import LocalDuckDBStore, MarketDataStoreError
 from quant_research.data.normalize import BarNormalizer
+from quant_research.data.partition_contracts import (
+    MarketDataImportRun,
+    MarketDataPartition,
+    MarketDataSourceSpec,
+    MarketDatasetDefinition,
+    hash_file,
+)
+from quant_research.data.partition_quality import MarketDataPartitionQualityValidator
 from quant_research.data.quality import KLineQualityValidator
 from quant_research.data.readers.base import KLineReader
 from quant_research.data.readers.csv_reader import CSVKLineReader
+from quant_research.data.readers.parquet_reader import ParquetKLineReader
 
 
 class KLineStore(Protocol):
@@ -24,8 +34,7 @@ class KLineStore(Protocol):
         run: ImportRun,
         bars,
         report: QualityReport,
-    ) -> DataRef:
-        ...
+    ) -> DataRef: ...
 
     def fail_import(
         self,
@@ -34,8 +43,7 @@ class KLineStore(Protocol):
         *,
         error_code: str,
         error_message: str,
-    ) -> None:
-        ...
+    ) -> None: ...
 
     def find_committed_import(
         self,
@@ -45,8 +53,7 @@ class KLineStore(Protocol):
         freq: Frequency,
         adjustment: Adjustment,
         source_file_hash: str,
-    ) -> ImportRun | None:
-        ...
+    ) -> ImportRun | None: ...
 
 
 @dataclass(frozen=True)
@@ -61,6 +68,21 @@ class IngestionResult:
     reused_existing: bool = False
 
 
+@dataclass(frozen=True)
+class MarketDataIngestionResult:
+    import_run_id: str
+    status: ImportStatus
+    partition_id: str | None
+    content_hash: str | None
+    row_count_raw: int
+    row_count_curated: int
+    quality_report: QualityReport
+    source_file_hash: str
+    reused_existing: bool = False
+    error_code: str | None = None
+    error_message: str | None = None
+
+
 class DataIngestionService:
     def __init__(
         self,
@@ -70,7 +92,10 @@ class DataIngestionService:
         run_id_factory: Callable[[], str] | None = None,
     ):
         self._store = store
-        self._readers = readers or {SourceType.CSV: CSVKLineReader()}
+        self._readers = readers or {
+            SourceType.CSV: CSVKLineReader(),
+            SourceType.PARQUET: ParquetKLineReader(),
+        }
         self._run_id_factory = run_id_factory or (lambda: str(uuid4()))
 
     def ingest(self, spec: SourceSpec) -> IngestionResult:
@@ -108,7 +133,11 @@ class DataIngestionService:
 
         normalizer = BarNormalizer(import_run_id=run.import_run_id)
         bars = [normalizer.normalize(row, spec) for row in raw_rows]
-        report = KLineQualityValidator(import_run_id=run.import_run_id).validate(bars)
+        report = KLineQualityValidator(
+            import_run_id=run.import_run_id,
+            calendar_id=spec.calendar_id,
+            timezone=spec.timezone,
+        ).validate(bars)
 
         if report.has_blocking_errors and spec.strict_mode:
             self._store.fail_import(
@@ -160,4 +189,141 @@ class DataIngestionService:
                 "adjustment": run.adjustment.value,
                 "source_run_id": run.import_run_id,
             },
+        )
+
+
+class ImmutableMarketDataIngestionService:
+    def __init__(
+        self,
+        store: LocalDuckDBStore,
+        *,
+        readers: Mapping[SourceType, KLineReader] | None = None,
+        run_id_factory: Callable[[], str] | None = None,
+    ):
+        self.store = store
+        self._readers = readers or {
+            SourceType.CSV: CSVKLineReader(),
+            SourceType.PARQUET: ParquetKLineReader(),
+        }
+        self._run_id_factory = run_id_factory or (lambda: str(uuid4()))
+
+    def ingest(
+        self,
+        definition: MarketDatasetDefinition,
+        spec: MarketDataSourceSpec,
+    ) -> MarketDataIngestionResult:
+        self.store.register_market_dataset_definition(definition)
+        source_file_hash = hash_file(spec.path)
+        run = MarketDataImportRun.create(
+            import_run_id=self._run_id_factory(),
+            spec=spec,
+            source_file_hash=source_file_hash,
+            definition_hash=definition.definition_hash,
+        )
+        existing_run = self.store.find_committed_market_data_import(run.import_fingerprint)
+        if existing_run is not None and existing_run.partition_id is not None:
+            partition = self.store.get_market_data_partition(existing_run.partition_id)
+            return MarketDataIngestionResult(
+                import_run_id=existing_run.import_run_id,
+                status=existing_run.status,
+                partition_id=existing_run.partition_id,
+                content_hash=partition.content_hash if partition else None,
+                row_count_raw=existing_run.row_count_raw,
+                row_count_curated=existing_run.row_count_curated,
+                quality_report=QualityReport(existing_run.import_run_id, ()),
+                source_file_hash=source_file_hash,
+                reused_existing=True,
+            )
+
+        validator = MarketDataPartitionQualityValidator(run.import_run_id, definition, spec)
+        try:
+            legacy_spec = spec.to_source_spec(definition)
+        except ValueError as exc:
+            report = validator.validate(())
+            failed = self.store.fail_market_data_import(
+                run,
+                report,
+                error_code="QUALITY_GATE_FAILED",
+                error_message=str(exc),
+            )
+            return self._failed_result(failed, report)
+
+        try:
+            raw_rows = list(self._reader_for(spec.source_type).read_rows(legacy_spec))
+            run = replace(run, row_count_raw=len(raw_rows))
+            normalizer = BarNormalizer(import_run_id=run.import_run_id)
+            bars = tuple(normalizer.normalize(row, legacy_spec) for row in raw_rows)
+        except Exception as exc:
+            report = QualityReport(run.import_run_id, ())
+            failed = self.store.fail_market_data_import(
+                run,
+                report,
+                error_code="READ_NORMALIZE_FAILED",
+                error_message=str(exc),
+                row_count_raw=run.row_count_raw,
+            )
+            return self._failed_result(failed, report)
+
+        report = validator.validate(bars)
+        if report.has_blocking_errors and spec.strict_mode:
+            failed = self.store.fail_market_data_import(
+                run,
+                report,
+                error_code="QUALITY_GATE_FAILED",
+                error_message="blocking market-data partition quality errors",
+                row_count_raw=len(raw_rows),
+            )
+            return self._failed_result(failed, report)
+
+        partition = MarketDataPartition.create(
+            definition,
+            spec,
+            bars,
+            source_file_hash=source_file_hash,
+        )
+        try:
+            commit = self.store.commit_market_data_partition(run, partition, report)
+        except MarketDataStoreError as exc:
+            failed = self.store.fail_market_data_import(
+                run,
+                report,
+                error_code=exc.code,
+                error_message=exc.message,
+                row_count_raw=len(raw_rows),
+            )
+            return self._failed_result(failed, report)
+        return MarketDataIngestionResult(
+            import_run_id=run.import_run_id,
+            status=ImportStatus.COMMITTED,
+            partition_id=commit.partition.partition_id,
+            content_hash=commit.partition.content_hash,
+            row_count_raw=len(raw_rows),
+            row_count_curated=len(commit.partition.bars),
+            quality_report=report,
+            source_file_hash=source_file_hash,
+            reused_existing=commit.reused_existing,
+        )
+
+    def _reader_for(self, source_type: SourceType) -> KLineReader:
+        try:
+            return self._readers[source_type]
+        except KeyError as exc:
+            raise ValueError(f"no K-line reader registered for source type: {source_type}") from exc
+
+    def _failed_result(
+        self,
+        failed: MarketDataImportRun,
+        report: QualityReport,
+    ) -> MarketDataIngestionResult:
+        return MarketDataIngestionResult(
+            import_run_id=failed.import_run_id,
+            status=failed.status,
+            partition_id=None,
+            content_hash=None,
+            row_count_raw=failed.row_count_raw,
+            row_count_curated=0,
+            quality_report=report,
+            source_file_hash=failed.source_file_hash,
+            error_code=failed.error_code,
+            error_message=failed.error_message,
         )

@@ -78,6 +78,10 @@ def test_duckdb_store_commits_bars_and_reads_by_data_ref(tmp_path):
     assert stored_run.row_count_raw == 2
     assert stored_run.row_count_curated == 2
 
+    export_path = store.export_bars_to_parquet(data_ref, tmp_path / "exports" / "bars.parquet")
+    assert export_path.exists()
+    assert export_path.suffix == ".parquet"
+
 
 def test_duckdb_store_persists_failed_quality_report_without_curated_rows(tmp_path):
     store = LocalDuckDBStore(tmp_path / "research.duckdb")

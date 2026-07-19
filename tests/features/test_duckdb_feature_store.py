@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
+import duckdb
 import polars as pl
 
 from quant_research.contracts.bar import Frequency
@@ -102,11 +103,26 @@ def test_feature_store_writes_manifest_table_and_snapshot(tmp_path):
     assert manifest.status == FeatureRunStatus.COMMITTED
     assert manifest.row_count_feature == 4
     assert manifest.row_count_snapshot == 2
+    assert manifest.code_version == "0.1.0"
+    assert manifest.config_hash.startswith("sha256:")
     assert {(row.factor_id, row.output_field) for row in feature_rows} == {
         ("ret_1", "ret_1"),
         ("ma_3", "ma_3"),
     }
+    assert {row.trading_date for row in feature_rows} == {"2026-07-01", "2026-07-02"}
     assert snapshots[1].features == {"ret_1": 0.01, "ma_3": None}
+
+    with duckdb.connect(str(tmp_path / "research.duckdb")) as conn:
+        index_sql = conn.execute(
+            """
+            SELECT sql FROM duckdb_indexes()
+            WHERE index_name = 'idx_feature_table_research_lookup'
+            """
+        ).fetchone()[0]
+    assert all(
+        column in index_sql
+        for column in ("dataset_id", "feature_set_id", "freq", "trading_date", "symbol")
+    )
 
 
 def test_feature_store_rejects_missing_key_column_and_writes_failed_manifest(tmp_path):
@@ -117,12 +133,59 @@ def test_feature_store_rejects_missing_key_column_and_writes_failed_manifest(tmp
     assert result.status == FeatureRunStatus.FAILED
     assert result.error_code == "MISSING_KEY_COLUMN"
     assert result.snapshot_ref is None
-
     manifest = store.get_manifest("factor-run-1")
     assert manifest is not None
     assert manifest.status == FeatureRunStatus.FAILED
     assert manifest.error_code == "MISSING_KEY_COLUMN"
     assert store.read_feature_table(result.feature_table_ref) == []
+
+
+def test_feature_store_adds_nullable_lineage_columns_to_existing_manifest_table(tmp_path):
+    db_path = tmp_path / "research.duckdb"
+    with duckdb.connect(str(db_path)) as conn:
+        conn.execute(
+            """
+            CREATE TABLE factor_run_manifest (
+                factor_run_id VARCHAR PRIMARY KEY,
+                feature_set_id VARCHAR NOT NULL,
+                dataset_id VARCHAR NOT NULL,
+                freq VARCHAR NOT NULL,
+                input_data_refs_json VARCHAR NOT NULL,
+                factor_versions_json VARCHAR NOT NULL,
+                factor_output_fields_json VARCHAR NOT NULL,
+                engine VARCHAR NOT NULL,
+                execution_mode VARCHAR NOT NULL,
+                status VARCHAR NOT NULL,
+                started_at VARCHAR NOT NULL,
+                finished_at VARCHAR,
+                row_count_input BIGINT,
+                row_count_feature BIGINT NOT NULL,
+                row_count_snapshot BIGINT NOT NULL,
+                quality_status VARCHAR NOT NULL,
+                quality_summary_json VARCHAR NOT NULL,
+                error_code VARCHAR,
+                error_message VARCHAR
+            )
+            """
+        )
+
+    LocalDuckDBFeatureStore(db_path)
+
+    with duckdb.connect(str(db_path)) as conn:
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info('factor_run_manifest')").fetchall()
+        }
+    assert {
+        "universe_ref",
+        "universe_id",
+        "universe_version",
+        "universe_definition_hash",
+        "universe_snapshot_set_hash",
+        "market_data_ref",
+        "market_dataset_version",
+        "market_data_definition_hash",
+        "market_data_snapshot_set_hash",
+    } <= columns
 
 
 def test_feature_store_rejects_missing_declared_factor_output(tmp_path):
@@ -188,6 +251,9 @@ def test_feature_store_writes_quality_metrics_and_updates_manifest(tmp_path):
     assert any(metric.metric_name == "future_leakage_count" for metric in metrics)
     assert manifest.quality_status == QualityStatus.PASSED.value
     assert manifest.quality_summary["status"] == "PASSED"
+    assert manifest.quality_report_ref == (
+        "duckdb://factor_quality_metric?factor_run_id=factor-run-1"
+    )
 
 
 def test_feature_store_marks_manifest_quality_failed_for_forward_leakage(tmp_path):
@@ -211,8 +277,7 @@ def test_feature_store_marks_manifest_quality_failed_for_forward_leakage(tmp_pat
     leakage = [
         metric
         for metric in store.list_quality_metrics("factor-run-1")
-        if metric.metric_name == "future_leakage_count"
-        and metric.factor_id == "ret_1"
+        if metric.metric_name == "future_leakage_count" and metric.factor_id == "ret_1"
     ][0]
     manifest = store.get_manifest("factor-run-1")
 

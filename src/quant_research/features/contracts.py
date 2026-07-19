@@ -68,6 +68,18 @@ class FeatureRunManifest:
     quality_summary: dict[str, Any] = field(default_factory=dict)
     error_code: str | None = None
     error_message: str | None = None
+    universe_ref: str | None = None
+    universe_id: str | None = None
+    universe_version: str | None = None
+    universe_definition_hash: str | None = None
+    universe_snapshot_set_hash: str | None = None
+    market_data_ref: str | None = None
+    market_dataset_version: str | None = None
+    market_data_definition_hash: str | None = None
+    market_data_snapshot_set_hash: str | None = None
+    code_version: str = "0.1.0"
+    config_hash: str = ""
+    quality_report_ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -88,6 +100,7 @@ class FeatureValue:
     quality_flags: tuple[str, ...]
     input_data_ref: str
     created_at: str
+    trading_date: str = ""
 
     @property
     def value(self) -> object:

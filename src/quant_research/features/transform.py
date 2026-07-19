@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import UTC, datetime
-from math import isfinite
 from typing import Any
 
 from quant_research.contracts.refs import DataRef
@@ -59,6 +58,7 @@ def wide_to_feature_values(request: FeatureCommitRequest) -> list[FeatureValue]:
                     quality_flags=(),
                     input_data_ref=request.config.input_data_ref,
                     created_at=created_at,
+                    trading_date=_format_as_of(row["as_of"])[:10],
                 )
             )
     _validate_unique_feature_keys(values)
@@ -173,8 +173,5 @@ def _split_value(value: Any) -> tuple[float | None, str | None, str]:
     if isinstance(value, bool):
         return None, "true" if value else "false", "bool"
     if isinstance(value, int | float):
-        numeric = float(value)
-        if not isfinite(numeric):
-            return None, None, "null"
-        return numeric, None, "float"
+        return float(value), None, "float"
     return None, str(value), "string"
