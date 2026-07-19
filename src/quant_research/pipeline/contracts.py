@@ -49,6 +49,7 @@ class ResearchRunRequest:
     feature_set_id: str
     input_data_ref: str
     factor_ids: tuple[str, ...]
+    coverage_report_ref: str | None = None
     universe_ref: str | None = None
     symbols: tuple[str, ...] | None = None
     as_of_start: datetime | None = None
@@ -68,6 +69,8 @@ class ResearchRunRequest:
             raise ValueError("input_data_ref is required")
         if not self.factor_ids:
             raise ValueError("factor_ids must not be empty")
+        if self.coverage_report_ref is not None and not self.coverage_report_ref.strip():
+            raise ValueError("coverage_report_ref must not be empty")
         if self.universe_ref is not None and not self.universe_ref.strip():
             raise ValueError("universe_ref must not be empty")
         if self.symbols == ():
@@ -118,10 +121,14 @@ class ResearchRunResult:
         error_code: str | None = None,
         error_message: str | None = None,
     ) -> "ResearchRunResult":
-        consumable = status == ResearchRunStatus.COMMITTED and quality_status == QualityStatus.PASSED
+        consumable = (
+            status == ResearchRunStatus.COMMITTED and quality_status == QualityStatus.PASSED
+        )
         block_reason = None
         if not consumable:
-            block_reason = "pipeline_failed" if status == ResearchRunStatus.FAILED else "quality_failed"
+            block_reason = (
+                "pipeline_failed" if status == ResearchRunStatus.FAILED else "quality_failed"
+            )
         return cls(
             factor_run_id=factor_run_id,
             status=status,

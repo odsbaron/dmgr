@@ -28,6 +28,7 @@ from quant_research.features.quality import (
 )
 from quant_research.contracts.bar import BarRecord
 from quant_research.contracts.refs import DataRef
+from quant_research.coverage.gates import CoverageGateError, CoverageGateProtocol
 from quant_research.data.duckdb_store import LocalDuckDBStore, MarketDataStoreError
 from quant_research.data.partition_contracts import MarketDataRef, ResolvedMarketData
 from quant_research.data.resolver import MarketDataResolver
@@ -54,6 +55,7 @@ class ResearchPipeline:
     factor_runner: PolarsFactorRunner
     feature_store: LocalDuckDBFeatureStore
     quality_analyzer: FactorQualityAnalyzer
+    coverage_gate: CoverageGateProtocol | None = None
     universe_resolver: UniverseResolver | None = None
     market_data_resolver: MarketDataResolver | None = None
     leakage_detector: PrefixInvarianceLeakageDetector = field(
@@ -61,6 +63,31 @@ class ResearchPipeline:
     )
 
     def run(self, request: ResearchRunRequest) -> ResearchRunResult:
+        if request.coverage_report_ref is not None:
+            if self.coverage_gate is None:
+                return self._failed_result(
+                    request,
+                    error_step="validate_coverage",
+                    error_code="COVERAGE_GATE_NOT_CONFIGURED",
+                    error_message="coverage_report_ref requires a configured coverage gate",
+                )
+            try:
+                self.coverage_gate.assert_report_consumable(request.coverage_report_ref)
+            except CoverageGateError as exc:
+                return self._failed_result(
+                    request,
+                    error_step="validate_coverage",
+                    error_code=exc.code,
+                    error_message=exc.message,
+                )
+            except ValueError as exc:
+                return self._failed_result(
+                    request,
+                    error_step="validate_coverage",
+                    error_code="COVERAGE_GATE_FAILED",
+                    error_message=str(exc),
+                )
+
         try:
             input_slice, resolved_market_data = self._resolve_market_data(request)
         except PipelineInputRefError as exc:

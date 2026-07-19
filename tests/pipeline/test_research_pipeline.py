@@ -15,6 +15,7 @@ from quant_research.data.partition_contracts import (
     MarketDatasetDefinition,
 )
 from quant_research.contracts.source import SourceType
+from quant_research.coverage.gates import CoverageGateError
 from quant_research.factors.contracts import ComputeMode, FactorSpec
 from quant_research.factors.dsl import field, op
 from quant_research.factors.polars import PolarsFactorRunner
@@ -106,6 +107,7 @@ def pipeline(
     db_path,
     registry: FactorRegistry,
     *,
+    coverage_gate=None,
     universe_resolver: UniverseResolver | None = None,
 ) -> ResearchPipeline:
     return ResearchPipeline(
@@ -114,6 +116,7 @@ def pipeline(
         factor_runner=PolarsFactorRunner(registry),
         feature_store=LocalDuckDBFeatureStore(db_path),
         quality_analyzer=FactorQualityAnalyzer(),
+        coverage_gate=coverage_gate,
         universe_resolver=universe_resolver,
     )
 
@@ -364,6 +367,69 @@ def test_research_pipeline_reports_invalid_input_ref_as_pipeline_failure(tmp_pat
     assert result.block_reason == "pipeline_failed"
     assert result.error_step == "parse_input_ref"
     assert result.error_code == "INVALID_INPUT_DATA_REF"
+
+
+class RecordingCoverageGate:
+    def __init__(self, error: CoverageGateError | None = None):
+        self.error = error
+        self.refs = []
+
+    def assert_report_consumable(self, report_ref):
+        self.refs.append(str(report_ref))
+        if self.error is not None:
+            raise self.error
+
+
+def test_research_pipeline_accepts_consumable_coverage_report_before_computation(tmp_path):
+    db_path = tmp_path / "research.duckdb"
+    data_ref = seed_bars(LocalDuckDBStore(db_path))
+    gate = RecordingCoverageGate()
+    service = pipeline(db_path, registry_with_ret_1(), coverage_gate=gate)
+    coverage_ref = "duckdb://coverage_run_manifest?coverage_run_id=coverage-run-1"
+
+    result = service.run(request(data_ref.uri, coverage_report_ref=coverage_ref))
+
+    assert result.status == ResearchRunStatus.COMMITTED
+    assert gate.refs == [coverage_ref]
+
+
+def test_research_pipeline_rejects_non_consumable_coverage_report(tmp_path):
+    db_path = tmp_path / "research.duckdb"
+    data_ref = seed_bars(LocalDuckDBStore(db_path))
+    gate = RecordingCoverageGate(
+        CoverageGateError("COVERAGE_REPORT_NOT_CONSUMABLE", "coverage is incomplete")
+    )
+    service = pipeline(db_path, registry_with_ret_1(), coverage_gate=gate)
+
+    result = service.run(
+        request(
+            data_ref.uri,
+            coverage_report_ref=("duckdb://coverage_run_manifest?coverage_run_id=coverage-run-1"),
+        )
+    )
+
+    assert result.status == ResearchRunStatus.FAILED
+    assert result.error_step == "validate_coverage"
+    assert result.error_code == "COVERAGE_REPORT_NOT_CONSUMABLE"
+
+
+def test_research_pipeline_requires_gate_only_when_coverage_ref_is_supplied(tmp_path):
+    db_path = tmp_path / "research.duckdb"
+    data_ref = seed_bars(LocalDuckDBStore(db_path))
+    service = pipeline(db_path, registry_with_ret_1())
+
+    without_ref = service.run(request(data_ref.uri))
+    with_ref = service.run(
+        request(
+            data_ref.uri,
+            factor_run_id="factor-run-2",
+            coverage_report_ref=("duckdb://coverage_run_manifest?coverage_run_id=coverage-run-1"),
+        )
+    )
+
+    assert without_ref.status == ResearchRunStatus.COMMITTED
+    assert with_ref.status == ResearchRunStatus.FAILED
+    assert with_ref.error_code == "COVERAGE_GATE_NOT_CONFIGURED"
 
 
 def test_research_pipeline_persists_failed_manifest_after_reading_input(tmp_path):
