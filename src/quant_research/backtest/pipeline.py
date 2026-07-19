@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict
+from dataclasses import asdict
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -60,6 +61,7 @@ class DailyBacktestPipeline:
             fills,
             initial_cash=request.initial_cash,
         )
+        content_hash = self._content_hash(fills, positions, nav_snapshots, metrics)
         finished_at = datetime.now(UTC).isoformat()
         manifest = BacktestRunManifest(
             backtest_run_id=request.backtest_run_id,
@@ -79,6 +81,7 @@ class DailyBacktestPipeline:
             started_at=started_at,
             finished_at=finished_at,
             config_hash=config_hash,
+            content_hash=content_hash,
             code_version=__version__,
             row_count_fill=len(fills),
             row_count_position=len(positions),
@@ -99,8 +102,9 @@ class DailyBacktestPipeline:
 
     def _simulate(self, request: DailyBacktestRequest):
         bars_by_date: dict[date, dict[str, BarRecord]] = defaultdict(dict)
+        target_dataset = request.target_weights[0].dataset_id
         for bar in request.bars:
-            if bar.dataset_id not in {target.dataset_id for target in request.target_weights}:
+            if bar.dataset_id != target_dataset:
                 continue
             if bar.symbol in bars_by_date[bar.trading_date]:
                 raise BacktestError(
@@ -114,31 +118,43 @@ class DailyBacktestPipeline:
         targets_by_as_of: dict[datetime, list[TargetWeight]] = defaultdict(list)
         for target in request.target_weights:
             targets_by_as_of[target.as_of].append(target)
-
-        events_by_date: dict[date, list[tuple[datetime, list[TargetWeight]]]] = defaultdict(list)
         ordered_dates = sorted(bars_by_date)
-        for as_of in sorted(targets_by_as_of):
-            targets = targets_by_as_of[as_of]
-            available_at = max(target.available_at for target in targets)
-            execution_date = self._next_execution_date(
-                ordered_dates,
-                bars_by_date,
-                as_of=as_of,
-                available_at=available_at,
-            )
-            if execution_date is None:
-                continue
-            events_by_date[execution_date].append((as_of, targets))
 
         ledger = PortfolioLedger(request.backtest_run_id, request.initial_cash)
         all_positions = []
         nav_snapshots = []
+        remaining_snapshots = dict(targets_by_as_of)
+        active_snapshot: tuple[datetime, list[TargetWeight]] | None = None
+        pending_symbols: set[str] = set()
         for trading_date in ordered_dates:
             daily_bars = bars_by_date[trading_date]
-            for as_of, targets in sorted(
-                events_by_date.get(trading_date, []), key=lambda item: item[0]
-            ):
-                self._execute_rebalance(request, ledger, as_of, targets, daily_bars)
+            ready_as_of = [
+                as_of
+                for as_of, targets in remaining_snapshots.items()
+                if self._group_is_ready(daily_bars, as_of, targets)
+            ]
+            if ready_as_of:
+                latest_as_of = max(ready_as_of)
+                active_snapshot = (latest_as_of, remaining_snapshots[latest_as_of])
+                remaining_snapshots = {
+                    as_of: targets
+                    for as_of, targets in remaining_snapshots.items()
+                    if as_of > latest_as_of
+                }
+                pending_symbols = set(ledger.quantities) | {
+                    target.symbol for target in active_snapshot[1]
+                }
+
+            if active_snapshot is not None and pending_symbols:
+                rebalance_as_of, targets = active_snapshot
+                pending_symbols = self._execute_rebalance(
+                    request,
+                    ledger,
+                    rebalance_as_of,
+                    targets,
+                    daily_bars,
+                    pending_symbols,
+                )
             close_prices = {symbol: Decimal(bar.close) for symbol, bar in daily_bars.items()}
             as_of = max(bar.bar_end_time for bar in daily_bars.values())
             positions, nav = ledger.mark_to_market(
@@ -150,19 +166,15 @@ class DailyBacktestPipeline:
             nav_snapshots.append(nav)
         return ledger.fills, all_positions, nav_snapshots
 
-    def _next_execution_date(
+    def _group_is_ready(
         self,
-        ordered_dates: list[date],
-        bars_by_date: dict[date, dict[str, BarRecord]],
-        *,
-        as_of: datetime,
-        available_at: datetime,
-    ) -> date | None:
-        for trading_date in ordered_dates:
-            bars = bars_by_date[trading_date].values()
-            if any(bar.bar_end_time > as_of and bar.bar_start_time >= available_at for bar in bars):
-                return trading_date
-        return None
+        daily_bars: dict[str, BarRecord],
+        rebalance_as_of: datetime,
+        targets: list[TargetWeight],
+    ) -> bool:
+        return any(
+            self._bar_is_after_group(bar, rebalance_as_of, targets) for bar in daily_bars.values()
+        )
 
     def _execute_rebalance(
         self,
@@ -171,33 +183,40 @@ class DailyBacktestPipeline:
         rebalance_as_of: datetime,
         targets: list[TargetWeight],
         daily_bars: dict[str, BarRecord],
-    ) -> None:
+        pending_symbols: set[str],
+    ) -> set[str]:
         target_by_symbol = {target.symbol: target for target in targets}
         open_prices = {symbol: Decimal(bar.open) for symbol, bar in daily_bars.items()}
         nav_at_open = ledger.total_value(open_prices)
         desired: dict[str, int] = {}
-        for symbol in sorted(set(ledger.quantities) | set(target_by_symbol)):
+        actionable: set[str] = set()
+        remaining = set(pending_symbols)
+        for symbol in sorted(pending_symbols):
             target = target_by_symbol.get(symbol)
             bar = daily_bars.get(symbol)
+            if bar is None:
+                continue
             if target is None:
+                if not self._bar_is_after_group(bar, rebalance_as_of, targets):
+                    continue
                 desired[symbol] = 0
-            elif bar is not None and self._bar_is_after_target(bar, target):
+            else:
+                if not self._bar_is_after_target(bar, target):
+                    continue
                 desired[symbol] = ledger.desired_quantity(
                     nav_at_open,
                     target.target_weight,
                     Decimal(bar.open),
                     request.execution.lot_size,
                 )
-            else:
-                desired[symbol] = ledger.quantities.get(symbol, 0)
+            actionable.add(symbol)
 
-        for symbol in sorted(desired):
+        for symbol in sorted(actionable):
             current = ledger.quantities.get(symbol, 0)
             if current <= desired[symbol]:
                 continue
             bar = daily_bars.get(symbol)
-            if bar is None or not self._bar_is_after_group(bar, rebalance_as_of, targets):
-                continue
+            assert bar is not None
             if not self.eligibility.is_eligible(bar, Side.SELL):
                 continue
             ledger.sell(
@@ -209,15 +228,18 @@ class DailyBacktestPipeline:
                 trading_date=bar.trading_date,
                 costs=request.costs,
             )
+            if ledger.quantities.get(symbol, 0) == desired[symbol]:
+                remaining.discard(symbol)
 
-        for symbol in sorted(desired):
+        for symbol in sorted(actionable):
             current = ledger.quantities.get(symbol, 0)
             if current >= desired[symbol]:
+                if current == desired[symbol]:
+                    remaining.discard(symbol)
                 continue
             bar = daily_bars.get(symbol)
             target = target_by_symbol.get(symbol)
-            if bar is None or target is None or not self._bar_is_after_target(bar, target):
-                continue
+            assert bar is not None and target is not None
             if not self.eligibility.is_eligible(bar, Side.BUY):
                 continue
             ledger.buy(
@@ -230,6 +252,9 @@ class DailyBacktestPipeline:
                 trading_date=bar.trading_date,
                 costs=request.costs,
             )
+            if ledger.quantities.get(symbol, 0) >= desired[symbol]:
+                remaining.discard(symbol)
+        return remaining
 
     def _bar_is_after_target(self, bar: BarRecord, target: TargetWeight) -> bool:
         return bar.bar_end_time > target.as_of and bar.bar_start_time >= target.available_at
@@ -245,6 +270,7 @@ class DailyBacktestPipeline:
 
     def _config_hash(self, request: DailyBacktestRequest) -> str:
         payload = {
+            "code_version": __version__,
             "target_source_ref": request.target_source_ref,
             "market_data_ref": request.market_data_ref,
             "initial_cash": str(request.initial_cash),
@@ -261,6 +287,12 @@ class DailyBacktestPipeline:
             "calendar_ref": request.calendar_ref,
             "daily_status_ref": request.daily_status_ref,
             "coverage_report_ref": request.coverage_report_ref,
+            "eligibility": {
+                "type": (
+                    f"{type(self.eligibility).__module__}.{type(self.eligibility).__qualname__}"
+                ),
+                "state": self._canonical_value(getattr(self.eligibility, "__dict__", {})),
+            },
             "targets": [
                 {
                     "portfolio_run_id": target.portfolio_run_id,
@@ -277,6 +309,54 @@ class DailyBacktestPipeline:
                     key=lambda item: (item.as_of, item.symbol),
                 )
             ],
+            "bars": [
+                bar.to_dict()
+                for bar in sorted(
+                    request.bars,
+                    key=lambda item: (
+                        item.dataset_id,
+                        item.trading_date,
+                        item.symbol,
+                        item.bar_start_time,
+                        item.source_run_id,
+                        item.source_row_id or "",
+                    ),
+                )
+            ],
         }
-        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return self._sha256(payload)
+
+    def _content_hash(self, fills, positions, nav_snapshots, metrics) -> str:
+        return self._sha256(
+            {
+                "fills": [asdict(fill) for fill in fills],
+                "positions": [asdict(position) for position in positions],
+                "nav": [asdict(snapshot) for snapshot in nav_snapshots],
+                "metrics": [asdict(metric) for metric in metrics],
+            }
+        )
+
+    def _sha256(self, payload: object) -> str:
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode()
         return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+    def _canonical_value(self, value: object) -> object:
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if isinstance(value, Decimal):
+            return str(value)
+        if isinstance(value, (date, datetime)):
+            return value.isoformat()
+        if isinstance(value, dict):
+            return {
+                str(key): self._canonical_value(item)
+                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            }
+        if isinstance(value, (list, tuple)):
+            return [self._canonical_value(item) for item in value]
+        return repr(value)

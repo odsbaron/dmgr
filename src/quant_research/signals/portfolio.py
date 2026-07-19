@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from math import ceil
 
 from quant_research.signals.contracts import (
     AlphaScore,
@@ -67,9 +66,10 @@ class EqualWeightPortfolioBuilder:
         if config.selection_mode == PortfolioSelectionMode.TOP_K:
             return ranked[: config.top_k]
 
-        group_size = ceil(len(ranked) / config.quantile_count)
-        if config.target_quantile == config.quantile_count:
-            start = 0
-        else:
-            start = (config.quantile_count - config.target_quantile) * group_size
-        return ranked[start : start + group_size]
+        count = len(ranked)
+        return [
+            score
+            for position, score in enumerate(ranked)
+            if config.quantile_count - (position * config.quantile_count // count)
+            == config.target_quantile
+        ]

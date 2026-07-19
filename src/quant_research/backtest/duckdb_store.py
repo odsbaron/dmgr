@@ -50,30 +50,54 @@ class LocalDuckDBBacktestStore:
             try:
                 conn.execute(
                     """
-                    INSERT INTO backtest_run_manifest VALUES (
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    INSERT INTO backtest_run_manifest (
+                        backtest_run_id, target_source_ref, market_data_ref, initial_cash,
+                        execution_config_json, cost_config_json, status, started_at, finished_at,
+                        config_hash, content_hash, code_version, row_count_fill,
+                        row_count_position, row_count_nav, row_count_metric, universe_ref,
+                        calendar_ref, daily_status_ref, coverage_report_ref
+                    ) VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                     )
                     """,
                     self._manifest_to_row(manifest),
                 )
                 if fills:
                     conn.executemany(
-                        "INSERT INTO backtest_fill VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        """
+                        INSERT INTO backtest_fill (
+                            fill_id, backtest_run_id, rebalance_as_of, execution_time,
+                            trading_date, symbol, side, quantity, price, notional, cost
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
                         [self._fill_to_row(fill) for fill in fills],
                     )
                 if positions:
                     conn.executemany(
-                        "INSERT INTO backtest_position VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        """
+                        INSERT INTO backtest_position (
+                            backtest_run_id, trading_date, as_of, symbol, quantity,
+                            close_price, market_value, portfolio_weight
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
                         [self._position_to_row(position) for position in positions],
                     )
                 if nav_snapshots:
                     conn.executemany(
-                        "INSERT INTO backtest_nav VALUES (?, ?, ?, ?, ?, ?)",
+                        """
+                        INSERT INTO backtest_nav (
+                            backtest_run_id, trading_date, as_of, cash, market_value, nav
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
                         [self._nav_to_row(snapshot) for snapshot in nav_snapshots],
                     )
                 if metrics:
                     conn.executemany(
-                        "INSERT INTO backtest_metric VALUES (?, ?, ?, ?)",
+                        """
+                        INSERT INTO backtest_metric (
+                            backtest_run_id, metric_name, metric_value, metric_json
+                        ) VALUES (?, ?, ?, ?)
+                        """,
                         [
                             (
                                 metric.backtest_run_id,
@@ -93,7 +117,15 @@ class LocalDuckDBBacktestStore:
     def get_manifest(self, backtest_run_id: str) -> BacktestRunManifest | None:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT * FROM backtest_run_manifest WHERE backtest_run_id = ?",
+                """
+                SELECT backtest_run_id, target_source_ref, market_data_ref, initial_cash,
+                       execution_config_json, cost_config_json, status, started_at, finished_at,
+                       config_hash, content_hash, code_version, row_count_fill,
+                       row_count_position, row_count_nav, row_count_metric, universe_ref,
+                       calendar_ref, daily_status_ref, coverage_report_ref
+                FROM backtest_run_manifest
+                WHERE backtest_run_id = ?
+                """,
                 [backtest_run_id],
             ).fetchone()
         return self._row_to_manifest(row) if row else None
@@ -101,7 +133,13 @@ class LocalDuckDBBacktestStore:
     def read_fills(self, backtest_run_id: str) -> list[Fill]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM backtest_fill WHERE backtest_run_id = ? ORDER BY execution_time, fill_id",
+                """
+                SELECT fill_id, backtest_run_id, rebalance_as_of, execution_time,
+                       trading_date, symbol, side, quantity, price, notional, cost
+                FROM backtest_fill
+                WHERE backtest_run_id = ?
+                ORDER BY execution_time, fill_id
+                """,
                 [backtest_run_id],
             ).fetchall()
         return [self._row_to_fill(row) for row in rows]
@@ -109,7 +147,12 @@ class LocalDuckDBBacktestStore:
     def read_nav(self, backtest_run_id: str) -> list[NavSnapshot]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM backtest_nav WHERE backtest_run_id = ? ORDER BY trading_date",
+                """
+                SELECT backtest_run_id, trading_date, as_of, cash, market_value, nav
+                FROM backtest_nav
+                WHERE backtest_run_id = ?
+                ORDER BY trading_date
+                """,
                 [backtest_run_id],
             ).fetchall()
         return [
@@ -127,7 +170,12 @@ class LocalDuckDBBacktestStore:
     def read_metrics(self, backtest_run_id: str) -> list[BacktestMetric]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM backtest_metric WHERE backtest_run_id = ? ORDER BY metric_name",
+                """
+                SELECT backtest_run_id, metric_name, metric_value, metric_json
+                FROM backtest_metric
+                WHERE backtest_run_id = ?
+                ORDER BY metric_name
+                """,
                 [backtest_run_id],
             ).fetchall()
         return [
@@ -155,6 +203,7 @@ class LocalDuckDBBacktestStore:
                     started_at VARCHAR NOT NULL,
                     finished_at VARCHAR NOT NULL,
                     config_hash VARCHAR NOT NULL,
+                    content_hash VARCHAR,
                     code_version VARCHAR NOT NULL,
                     row_count_fill BIGINT NOT NULL,
                     row_count_position BIGINT NOT NULL,
@@ -166,6 +215,9 @@ class LocalDuckDBBacktestStore:
                     coverage_report_ref VARCHAR
                 )
                 """
+            )
+            conn.execute(
+                "ALTER TABLE backtest_run_manifest ADD COLUMN IF NOT EXISTS content_hash VARCHAR"
             )
             conn.execute(
                 """
@@ -251,6 +303,7 @@ class LocalDuckDBBacktestStore:
             manifest.started_at,
             manifest.finished_at,
             manifest.config_hash,
+            manifest.content_hash,
             manifest.code_version,
             manifest.row_count_fill,
             manifest.row_count_position,
@@ -274,15 +327,16 @@ class LocalDuckDBBacktestStore:
             started_at=row[7],
             finished_at=row[8],
             config_hash=row[9],
-            code_version=row[10],
-            row_count_fill=row[11],
-            row_count_position=row[12],
-            row_count_nav=row[13],
-            row_count_metric=row[14],
-            universe_ref=row[15],
-            calendar_ref=row[16],
-            daily_status_ref=row[17],
-            coverage_report_ref=row[18],
+            content_hash=row[10],
+            code_version=row[11],
+            row_count_fill=row[12],
+            row_count_position=row[13],
+            row_count_nav=row[14],
+            row_count_metric=row[15],
+            universe_ref=row[16],
+            calendar_ref=row[17],
+            daily_status_ref=row[18],
+            coverage_report_ref=row[19],
         )
 
     def _fill_to_row(self, fill: Fill) -> tuple[object, ...]:

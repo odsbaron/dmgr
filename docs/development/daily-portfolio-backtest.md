@@ -22,6 +22,10 @@ training implementations.
 time the score can be consumed. The MVP execution convention is
 `NEXT_ELIGIBLE_DAILY_OPEN`: a target can only trade on a bar whose end is strictly
 after `as_of` and whose start is not before `available_at`.
+If a target symbol has no eligible bar at the first market open, its target remains
+pending and is retried on later sessions. When several complete snapshots become
+usable at one open, only the latest `as_of` snapshot is activated; it supersedes
+older snapshots rather than causing multiple same-open rebalances.
 
 ## Portfolio construction
 
@@ -57,9 +61,12 @@ protocol rather than add their rules to the simulator.
 - `backtest_metric`
 
 The manifest records the stable input refs, execution and cost configuration, code
-version, config hash, optional Universe/Calendar/DailyStatus/Coverage refs, and row
-counts. Repeating a committed run id with an identical config reuses the result;
-changing the config raises `BACKTEST_RUN_CONFLICT` without replacing the original.
+version, config hash, result content hash, optional
+Universe/Calendar/DailyStatus/Coverage refs, and row counts. The config hash covers
+the target rows, canonical market bars, eligibility-policy identity and state, and
+code version in addition to the refs. Repeating a committed run id with identical
+inputs reuses the result; changing any hashed input raises `BACKTEST_RUN_CONFLICT`
+without replacing the original.
 
 This MVP deliberately excludes live trading, partial fills, price limits, corporate
 actions, leverage, shorting, and minute-level execution.

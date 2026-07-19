@@ -66,3 +66,25 @@ def test_top_quantile_selects_highest_ranked_group_deterministically():
     )
 
     assert [target.symbol for target in targets] == ["000005.SZ"]
+
+
+def test_quantile_partition_has_no_empty_bucket_when_cross_section_is_large_enough():
+    cross_section = [score(f"00000{index}.SZ", float(index)) for index in range(1, 7)]
+    selected_by_quantile = [
+        EqualWeightPortfolioBuilder().build(
+            cross_section,
+            PortfolioConstructionConfig(
+                portfolio_run_id=f"portfolio-q{quantile}",
+                selection_mode=PortfolioSelectionMode.TOP_QUANTILE,
+                quantile_count=5,
+                target_quantile=quantile,
+            ),
+        )
+        for quantile in range(1, 6)
+    ]
+
+    assert all(selected_by_quantile)
+    selected_symbols = [
+        target.symbol for quantile_targets in selected_by_quantile for target in quantile_targets
+    ]
+    assert sorted(selected_symbols) == [f"00000{index}.SZ" for index in range(1, 7)]

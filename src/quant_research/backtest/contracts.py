@@ -49,8 +49,12 @@ class ProportionalCostConfig:
             or not self.sell_rate.is_finite()
             or self.buy_rate < 0
             or self.sell_rate < 0
+            or self.buy_rate >= 1
+            or self.sell_rate >= 1
         ):
-            raise BacktestError("INVALID_COST_RATE", "cost rates must be non-negative")
+            raise BacktestError(
+                "INVALID_COST_RATE", "cost rates must be finite and in the interval [0, 1)"
+            )
 
     def calculate(self, side: Side, notional: Decimal) -> Decimal:
         rate = self.buy_rate if side == Side.BUY else self.sell_rate
@@ -64,6 +68,11 @@ class DailyExecutionConfig:
     convention: str = "NEXT_ELIGIBLE_DAILY_OPEN"
 
     def __post_init__(self) -> None:
+        if self.convention != "NEXT_ELIGIBLE_DAILY_OPEN":
+            raise BacktestError(
+                "UNSUPPORTED_EXECUTION_CONVENTION",
+                "daily MVP supports NEXT_ELIGIBLE_DAILY_OPEN only",
+            )
         if self.price_field != "open":
             raise BacktestError("UNSUPPORTED_PRICE_FIELD", "daily MVP supports open execution only")
         if self.lot_size < 1:
@@ -88,27 +97,42 @@ class DailyBacktestRequest:
     def __post_init__(self) -> None:
         if not self.backtest_run_id:
             raise BacktestError("MISSING_RUN_ID", "backtest_run_id is required")
-        for name in ("target_source_ref", "market_data_ref"):
+        required_ref_tables = {
+            "target_source_ref": "target_weight",
+            "market_data_ref": "curated_market_bar",
+        }
+        for name, expected_table in required_ref_tables.items():
             value = getattr(self, name)
             if not value:
                 raise BacktestError("MISSING_REF", f"{name} is required")
             try:
-                DataRef.parse(value)
+                parsed = DataRef.parse(value)
             except ValueError as exc:
                 raise BacktestError("INVALID_REF", f"invalid {name}: {exc}") from exc
-        for name in (
-            "universe_ref",
-            "calendar_ref",
-            "daily_status_ref",
-            "coverage_report_ref",
-        ):
+            if parsed.table != expected_table:
+                raise BacktestError(
+                    "INVALID_REF_TABLE",
+                    f"{name} must point to {expected_table}, got {parsed.table}",
+                )
+        optional_ref_tables = {
+            "universe_ref": "universe_member",
+            "calendar_ref": "market_calendar_day",
+            "daily_status_ref": "instrument_daily_status",
+            "coverage_report_ref": "coverage_run_manifest",
+        }
+        for name, expected_table in optional_ref_tables.items():
             value = getattr(self, name)
             if value is None:
                 continue
             try:
-                DataRef.parse(value)
+                parsed = DataRef.parse(value)
             except ValueError as exc:
                 raise BacktestError("INVALID_REF", f"invalid {name}: {exc}") from exc
+            if parsed.table != expected_table:
+                raise BacktestError(
+                    "INVALID_REF_TABLE",
+                    f"{name} must point to {expected_table}, got {parsed.table}",
+                )
         if not self.target_weights:
             raise BacktestError("EMPTY_TARGETS", "target_weights must not be empty")
         if not self.bars:
@@ -202,6 +226,7 @@ class BacktestRunManifest:
     started_at: str
     finished_at: str
     config_hash: str
+    content_hash: str
     code_version: str
     row_count_fill: int
     row_count_position: int
