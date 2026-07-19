@@ -4,7 +4,9 @@ import pytest
 
 from quant_research.datasets import (
     LocalDuckDBTrainingDatasetStore,
+    MaterializeTrainingDatasetRequest,
     TrainingDatasetError,
+    TrainingDatasetMaterializer,
     TrainingFeatureMatrixBuilder,
 )
 from quant_research.features.gates import FeatureQualityGate
@@ -75,7 +77,13 @@ def test_builder_rejects_different_exact_market_data_definitions(tmp_path):
                 market_data_definition_hash = ?, market_data_snapshot_set_hash = ?
             WHERE factor_run_id = ?
             """,
-            ["feature-ref", "v1", "sha256:feature-definition", "sha256:feature-set", "factor-run-1"],
+            [
+                "feature-ref",
+                "v1",
+                "sha256:feature-definition",
+                "sha256:feature-set",
+                "factor-run-1",
+            ],
         )
 
     with pytest.raises(TrainingDatasetError) as exc_info:
@@ -186,3 +194,57 @@ def test_training_dataset_id_conflict_preserves_original_manifest(tmp_path):
 
     assert exc_info.value.code == "TRAINING_DATASET_CONFLICT"
     assert dataset_store.get_manifest("training-v1").content_hash == "sha256:first"
+
+
+def test_builder_materializes_assembled_matrix_without_gate_rereads(tmp_path):
+    feature_store, label_store, dataset_store, feature_commit = _stores(tmp_path)
+    label_ref = _commit_labels(label_store, definition_hash="sha256:shared-definition")
+    with feature_store._connect() as conn:
+        conn.execute(
+            """
+            UPDATE factor_run_manifest
+            SET market_data_ref = ?, market_dataset_version = ?,
+                market_data_definition_hash = ?, market_data_snapshot_set_hash = ?
+            WHERE factor_run_id = ?
+            """,
+            ["feature-ref", "v1", "sha256:shared-definition", "sha256:feature-set", "factor-run-1"],
+        )
+
+    class CountingFeatureGate:
+        def __init__(self, store):
+            self.feature_store = store
+            self.read_count = 0
+
+        def read_consumable_snapshot(self, ref):
+            self.read_count += 1
+            return FeatureQualityGate(self.feature_store).read_consumable_snapshot(ref)
+
+    class CountingLabelGate:
+        def __init__(self, store):
+            self.label_store = store
+            self.read_count = 0
+
+        def read_consumable_labels(self, ref):
+            self.read_count += 1
+            return LabelQualityGate(self.label_store).read_consumable_labels(ref)
+
+    feature_gate = CountingFeatureGate(feature_store)
+    label_gate = CountingLabelGate(label_store)
+    result = TrainingFeatureMatrixBuilder(
+        feature_gate,
+        label_gate,
+        dataset_store,
+    ).build_materialized(
+        "training-v1",
+        feature_commit.snapshot_ref,
+        label_ref,
+        materializer=TrainingDatasetMaterializer(dataset_store),
+        request=MaterializeTrainingDatasetRequest("materialized-v1", tmp_path / "artifacts"),
+        feature_fields=("ret_1",),
+        label_fields=("forward_ret_1",),
+    )
+
+    assert feature_gate.read_count == 1
+    assert label_gate.read_count == 1
+    assert result.manifest.row_count_input == 2
+    assert result.manifest.row_count_materialized == 1

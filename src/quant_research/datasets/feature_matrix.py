@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import polars as pl
 
@@ -19,6 +20,13 @@ from quant_research.features.contracts import FeatureSnapshot
 from quant_research.features.gates import FeatureQualityGate
 from quant_research.labels.contracts import LabelRunManifest, LabelValue
 from quant_research.labels.gates import LabelQualityGate
+
+if TYPE_CHECKING:
+    from quant_research.datasets.contracts import (
+        MaterializedTrainingDatasetResult,
+        MaterializeTrainingDatasetRequest,
+    )
+    from quant_research.datasets.materialization import TrainingDatasetMaterializer
 
 
 _KEY_COLUMNS = [
@@ -60,7 +68,9 @@ class TrainingFeatureMatrixBuilder:
         snapshots, labels, _, _ = self._read_compatible_inputs(snapshot_ref, label_ref)
         feature_frame = snapshots_to_feature_matrix(snapshots, feature_fields=feature_fields)
         label_frame = labels_to_label_matrix(labels, label_fields=label_fields)
-        return feature_frame.join(label_frame, on=["dataset_id", "symbol", "freq", "as_of"], how="inner")
+        return feature_frame.join(
+            label_frame, on=["dataset_id", "symbol", "freq", "as_of"], how="inner"
+        )
 
     def build_manifested(
         self,
@@ -96,7 +106,9 @@ class TrainingFeatureMatrixBuilder:
         label_frame = labels_to_label_matrix(labels, label_fields=selected_labels).collect()
         keys = ["dataset_id", "symbol", "freq", "as_of"]
         joined = feature_frame.join(label_frame, on=keys, how="inner")
-        feature_only = feature_frame.select(keys).join(label_frame.select(keys), on=keys, how="anti")
+        feature_only = feature_frame.select(keys).join(
+            label_frame.select(keys), on=keys, how="anti"
+        )
         label_only = label_frame.select(keys).join(feature_frame.select(keys), on=keys, how="anti")
 
         canonical_feature_ref = _as_ref(snapshot_ref).uri
@@ -134,12 +146,8 @@ class TrainingFeatureMatrixBuilder:
             status=TrainingDatasetStatus.COMMITTED,
             created_at=datetime.now(UTC).isoformat(),
             market_data_definition_hash=feature_manifest.market_data_definition_hash,
-            feature_market_data_snapshot_set_hash=(
-                feature_manifest.market_data_snapshot_set_hash
-            ),
-            label_market_data_snapshot_set_hash=(
-                label_manifest.market_data_snapshot_set_hash
-            ),
+            feature_market_data_snapshot_set_hash=(feature_manifest.market_data_snapshot_set_hash),
+            label_market_data_snapshot_set_hash=(label_manifest.market_data_snapshot_set_hash),
             universe_ref=feature_manifest.universe_ref,
             universe_id=feature_manifest.universe_id,
             universe_version=feature_manifest.universe_version,
@@ -155,6 +163,26 @@ class TrainingFeatureMatrixBuilder:
             manifest=commit.manifest,
             reused_existing=commit.reused_existing,
         )
+
+    def build_materialized(
+        self,
+        training_dataset_id: str,
+        snapshot_ref: DataRef | str,
+        label_ref: DataRef | str,
+        *,
+        materializer: "TrainingDatasetMaterializer",
+        request: "MaterializeTrainingDatasetRequest",
+        feature_fields: tuple[str, ...] | None = None,
+        label_fields: tuple[str, ...] | None = None,
+    ) -> "MaterializedTrainingDatasetResult":
+        build = self.build_manifested(
+            training_dataset_id,
+            snapshot_ref,
+            label_ref,
+            feature_fields=feature_fields,
+            label_fields=label_fields,
+        )
+        return materializer.materialize(build, request)
 
     def _read_compatible_inputs(
         self,
@@ -328,6 +356,5 @@ def _label_rows(labels: list[LabelValue], fields: list[str]) -> list[dict[str, o
             row[label.label_id] = label.value
 
     return [
-        {**row, **{field: row.get(field) for field in fields}}
-        for _, row in sorted(grouped.items())
+        {**row, **{field: row.get(field) for field in fields}} for _, row in sorted(grouped.items())
     ]
