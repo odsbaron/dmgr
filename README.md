@@ -25,6 +25,7 @@ Development docs:
 - `docs/development/universe-management.md`
 - `docs/development/market-calendar-daily-status.md`
 - `docs/development/label-training-dataset-lineage.md`
+- `docs/development/daily-portfolio-backtest.md`
 - `docs/superpowers/plans/2026-07-08-research-pipeline-after-factor-quality.md`
 
 Implemented entry points:
@@ -64,6 +65,10 @@ Implemented entry points:
 - `quant_research.pipeline.bar_frame.bars_to_factor_frame`
 - `quant_research.pipeline.research.ResearchPipeline`
 - `quant_research.cli.app`
+- `quant_research.signals.contracts.AlphaScore`
+- `quant_research.signals.portfolio.EqualWeightPortfolioBuilder`
+- `quant_research.backtest.pipeline.DailyBacktestPipeline`
+- `quant_research.backtest.duckdb_store.LocalDuckDBBacktestStore`
 
 Next implementation lane:
 
@@ -167,3 +172,12 @@ Verification:
 .venv/bin/python -m pytest -v
 .venv/bin/ruff check src tests
 ```
+
+## Daily Backtest Boundary
+
+The daily simulator consumes source-independent target weights and daily `BarRecord`
+inputs. A score records both the factor timestamp (`as_of`) and the earliest usable
+time (`available_at`); the default execution convention trades only at the next
+eligible daily open. The backtest package does not compute factors, load models, or
+submit real orders. See `docs/development/daily-portfolio-backtest.md` for the domain
+boundary and Python entry points.
