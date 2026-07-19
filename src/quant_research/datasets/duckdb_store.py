@@ -6,6 +6,9 @@ from pathlib import Path
 import duckdb
 
 from quant_research.datasets.contracts import (
+    MaterializedDatasetCommitResult,
+    MaterializedDatasetStatus,
+    MaterializedTrainingDatasetManifest,
     TrainingDatasetCommitResult,
     TrainingDatasetError,
     TrainingDatasetManifest,
@@ -44,6 +47,29 @@ _COLUMNS = (
     "label_source_kind",
     "label_source_ref",
     "label_forward_bars",
+)
+
+_MATERIALIZED_COLUMNS = (
+    "materialized_dataset_id",
+    "training_dataset_id",
+    "source_content_hash",
+    "artifact_ref",
+    "artifact_format",
+    "feature_fields_json",
+    "label_fields_json",
+    "schema_fields_json",
+    "row_count_input",
+    "row_count_materialized",
+    "row_count_dropped_warmup",
+    "row_count_dropped_null_labels",
+    "drop_incomplete_warmup",
+    "drop_null_labels",
+    "definition_hash",
+    "schema_hash",
+    "content_hash",
+    "artifact_hash",
+    "status",
+    "created_at",
 )
 
 
@@ -85,6 +111,55 @@ class LocalDuckDBTrainingDatasetStore:
             ).fetchone()
         return self._from_row(row) if row else None
 
+    def commit_materialized_manifest(
+        self,
+        manifest: MaterializedTrainingDatasetManifest,
+    ) -> MaterializedDatasetCommitResult:
+        existing = self.get_materialized_manifest(manifest.materialized_dataset_id)
+        if existing is not None:
+            if (
+                existing.definition_hash != manifest.definition_hash
+                or existing.content_hash != manifest.content_hash
+            ):
+                raise TrainingDatasetError(
+                    "MATERIALIZED_DATASET_CONFLICT",
+                    "materialized_dataset_id already exists with different content or definition",
+                )
+            if not existing.artifact_path.is_file():
+                raise TrainingDatasetError(
+                    "MATERIALIZED_ARTIFACT_MISSING",
+                    f"committed artifact is missing: {existing.artifact_path}",
+                )
+            return MaterializedDatasetCommitResult(existing, reused_existing=True)
+
+        placeholders = ", ".join(["?"] * len(_MATERIALIZED_COLUMNS))
+        with self._connect() as conn:
+            conn.execute(
+                f"""
+                INSERT INTO materialized_training_dataset_manifest (
+                    {", ".join(_MATERIALIZED_COLUMNS)}
+                )
+                VALUES ({placeholders})
+                """,
+                self._materialized_to_row(manifest),
+            )
+        return MaterializedDatasetCommitResult(manifest)
+
+    def get_materialized_manifest(
+        self,
+        materialized_dataset_id: str,
+    ) -> MaterializedTrainingDatasetManifest | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT {", ".join(_MATERIALIZED_COLUMNS)}
+                FROM materialized_training_dataset_manifest
+                WHERE materialized_dataset_id = ?
+                """,
+                [materialized_dataset_id],
+            ).fetchone()
+        return self._materialized_from_row(row) if row else None
+
     def _initialize(self) -> None:
         with self._connect() as conn:
             conn.execute(
@@ -120,6 +195,32 @@ class LocalDuckDBTrainingDatasetStore:
                     label_source_kind VARCHAR NOT NULL,
                     label_source_ref VARCHAR,
                     label_forward_bars BIGINT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS materialized_training_dataset_manifest (
+                    materialized_dataset_id VARCHAR PRIMARY KEY,
+                    training_dataset_id VARCHAR NOT NULL,
+                    source_content_hash VARCHAR NOT NULL,
+                    artifact_ref VARCHAR NOT NULL,
+                    artifact_format VARCHAR NOT NULL,
+                    feature_fields_json VARCHAR NOT NULL,
+                    label_fields_json VARCHAR NOT NULL,
+                    schema_fields_json VARCHAR NOT NULL,
+                    row_count_input BIGINT NOT NULL,
+                    row_count_materialized BIGINT NOT NULL,
+                    row_count_dropped_warmup BIGINT NOT NULL,
+                    row_count_dropped_null_labels BIGINT NOT NULL,
+                    drop_incomplete_warmup BOOLEAN NOT NULL,
+                    drop_null_labels BOOLEAN NOT NULL,
+                    definition_hash VARCHAR NOT NULL,
+                    schema_hash VARCHAR NOT NULL,
+                    content_hash VARCHAR NOT NULL,
+                    artifact_hash VARCHAR NOT NULL,
+                    status VARCHAR NOT NULL,
+                    created_at VARCHAR NOT NULL
                 )
                 """
             )
@@ -193,4 +294,55 @@ class LocalDuckDBTrainingDatasetStore:
             label_source_kind=row[27],
             label_source_ref=row[28],
             label_forward_bars=row[29],
+        )
+
+    def _materialized_to_row(
+        self,
+        manifest: MaterializedTrainingDatasetManifest,
+    ) -> tuple[object, ...]:
+        return (
+            manifest.materialized_dataset_id,
+            manifest.training_dataset_id,
+            manifest.source_content_hash,
+            manifest.artifact_ref,
+            manifest.artifact_format,
+            json.dumps(list(manifest.feature_fields), sort_keys=True),
+            json.dumps(list(manifest.label_fields), sort_keys=True),
+            json.dumps(list(manifest.schema_fields)),
+            manifest.row_count_input,
+            manifest.row_count_materialized,
+            manifest.row_count_dropped_warmup,
+            manifest.row_count_dropped_null_labels,
+            manifest.drop_incomplete_warmup,
+            manifest.drop_null_labels,
+            manifest.definition_hash,
+            manifest.schema_hash,
+            manifest.content_hash,
+            manifest.artifact_hash,
+            manifest.status.value,
+            manifest.created_at,
+        )
+
+    def _materialized_from_row(self, row) -> MaterializedTrainingDatasetManifest:
+        return MaterializedTrainingDatasetManifest(
+            materialized_dataset_id=row[0],
+            training_dataset_id=row[1],
+            source_content_hash=row[2],
+            artifact_ref=row[3],
+            artifact_format=row[4],
+            feature_fields=tuple(json.loads(row[5])),
+            label_fields=tuple(json.loads(row[6])),
+            schema_fields=tuple(json.loads(row[7])),
+            row_count_input=row[8],
+            row_count_materialized=row[9],
+            row_count_dropped_warmup=row[10],
+            row_count_dropped_null_labels=row[11],
+            drop_incomplete_warmup=row[12],
+            drop_null_labels=row[13],
+            definition_hash=row[14],
+            schema_hash=row[15],
+            content_hash=row[16],
+            artifact_hash=row[17],
+            status=MaterializedDatasetStatus(row[18]),
+            created_at=row[19],
         )
